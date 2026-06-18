@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
+import { createSecretStore } from "./secrets.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -163,6 +164,7 @@ function connect() {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === "ping") { safeSend({ type: "pong" }); return; }
+    if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
     if (msg.type === "fill_request" && msg.request_id) {
       msg._requested_at = new Date().toISOString();
       pending.set(msg.request_id, msg);
@@ -186,6 +188,28 @@ function scheduleReconnect() {
 
 function safeSend(obj) {
   try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {}
+}
+
+// Service asked for a session-encryption secret by secret_id (zero-knowledge
+// decryption). Phase 1: auto-respond from the per-env filesystem vault. The
+// user-facing Approve Once/24h/Always/Deny prompt is the next phase. The secret
+// is sent only over this authenticated socket and is never logged.
+function handleSecretRequest(msg) {
+  const sidShort = String(msg.secret_id || "").slice(0, 12) + "…";
+  let secret = null;
+  try {
+    const { baseUrl } = loadConfig();
+    secret = createSecretStore({ baseUrl }).getSecret(msg.secret_id);
+  } catch (e) {
+    console.warn("[keeper] secret store error:", e.message);
+  }
+  if (secret) {
+    safeSend({ type: "secret_response", request_id: msg.request_id, secret, grant: "once" });
+    console.log("[keeper] secret_request", sidShort, "-> responded");
+  } else {
+    safeSend({ type: "secret_response", request_id: msg.request_id, denied: true });
+    console.warn("[keeper] secret_request", sidShort, "-> not in vault, denied");
+  }
 }
 
 // ---------- Prompt window ----------
