@@ -1,0 +1,16 @@
+{
+  "name": "remote-browser-keeper",
+  "version": "0.1.0",
+  "description": "Tray app that supplies passwords/logins to remote browser sessions without exposing them to the AI model.",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

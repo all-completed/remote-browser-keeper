@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+dist/
+out/
+# Never commit secrets or local runtime data
+secrets.json
+.env
+.env.*

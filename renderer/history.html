@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <link rel="stylesheet" href="history.css" />
+    <title>Request history</title>
+  </head>
+  <body>
+    <div id="glow"></div>
+    <main id="wrap">
+      <header id="head">
+        <div id="title">Request history</div>
+        <div id="sub">What was requested and when — values are never stored.</div>
+        <div id="actions">
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </header>
+      <div id="list"></div>
+      <p id="empty" hidden>No requests yet.</p>
+    </main>
+    <script src="history.js"></script>
+  </body>
+</html>
