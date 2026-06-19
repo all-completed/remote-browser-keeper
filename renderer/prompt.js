@@ -20,7 +20,60 @@ function shortUrl(u) {
 }
 
 function isSecret(field) {
-  return !(field === "text" || field === "login" || field === "email");
+  const f = String(field || "").toLowerCase();
+  // Masked: password, code, card-number, card-cvv. Plain: text/login/email and
+  // card-holder-name / card-exp / card-billing-address.
+  return !(
+    f === "text" || f === "login" || f === "email" ||
+    f === "card-holder-name" || f === "card-exp" || f === "card-billing-address"
+  );
+}
+
+function isMultiline(field) {
+  return String(field || "").toLowerCase() === "card-billing-address";
+}
+
+function cardMaxLen(field) {
+  switch (String(field || "").toLowerCase()) {
+    case "card-number": return 23; // up to 19 digits + grouping spaces
+    case "card-cvv": return 4;
+    case "card-exp": return 5; // MM/YY
+    default: return 0;
+  }
+}
+
+// Transform input for the digit-grouped/MM-YY card fields; null = not such a field.
+function formatCardInput(field, raw) {
+  switch (String(field || "").toLowerCase()) {
+    case "card-number": {
+      const d = raw.replace(/\D/g, "").slice(0, 19);
+      return d.replace(/(.{4})/g, "$1 ").trim();
+    }
+    case "card-exp": {
+      const d = raw.replace(/\D/g, "").slice(0, 4);
+      return d.length <= 2 ? d : d.slice(0, 2) + "/" + d.slice(2);
+    }
+    case "card-cvv":
+      return raw.replace(/\D/g, "").slice(0, 4);
+    default:
+      return null;
+  }
+}
+
+// Value to submit (card number is grouped for display; send digits only).
+function submitVal(field, v) {
+  return String(field || "").toLowerCase() === "card-number" ? v.replace(/\s+/g, "") : v;
+}
+
+function cardHint(field) {
+  switch (String(field || "").toLowerCase()) {
+    case "card-number": return "card number · digits only";
+    case "card-cvv": return "CVV";
+    case "card-exp": return "MM/YY";
+    case "card-holder-name": return "name on card";
+    case "card-billing-address": return "billing address";
+    default: return "";
+  }
 }
 
 function applyFormat(input, format) {
@@ -48,28 +101,57 @@ function makeRow(field) {
 
   const row = document.createElement("div");
   row.className = "inputRow";
-  const input = document.createElement("input");
-  input.type = isSecret(field.field) ? "password" : "text";
-  input.autocomplete = "off"; input.autocorrect = "off";
-  input.autocapitalize = "off"; input.spellcheck = false;
+
+  const kind = String(field.field || "").toLowerCase();
+  const multiline = isMultiline(kind);
+  const secret = isSecret(kind);
+
+  let input;
+  if (multiline) {
+    input = document.createElement("textarea");
+    input.rows = 3;
+    input.autocapitalize = "sentences";
+  } else {
+    input = document.createElement("input");
+    input.type = secret ? "password" : "text";
+    input.autocapitalize = kind === "card-holder-name" ? "words" : "off";
+  }
+  input.autocomplete = "off"; input.autocorrect = "off"; input.spellcheck = false;
   input.placeholder = "Type here…";
-  if (Number.isInteger(field.length) && field.length > 0) input.maxLength = field.length;
-  const hintText = applyFormat(input, field.format);
+
+  const ml = (Number.isInteger(field.length) && field.length > 0) ? field.length : cardMaxLen(kind);
+  if (ml) input.maxLength = ml;
+
+  // Field-specific formatting + hint.
+  let hintText = "";
+  if (formatCardInput(kind, "") !== null) {
+    // card-number / card-exp / card-cvv: live digit-grouping / MM-YY.
+    input.inputMode = "numeric";
+    input.addEventListener("input", () => { input.value = formatCardInput(kind, input.value); });
+    hintText = cardHint(kind);
+  } else if (kind.startsWith("card-")) {
+    // card-holder-name / card-billing-address: no transform, just a hint.
+    hintText = cardHint(kind);
+  } else {
+    hintText = applyFormat(input, field.format);
+  }
   row.appendChild(input);
 
-  const reveal = document.createElement("button");
-  reveal.type = "button"; reveal.className = "reveal"; reveal.title = "Show / hide";
-  reveal.textContent = "👁";
-  reveal.addEventListener("click", () => {
-    input.type = input.type === "password" ? "text" : "password";
-    input.focus();
-  });
-  row.appendChild(reveal);
+  if (secret && !multiline) {
+    const reveal = document.createElement("button");
+    reveal.type = "button"; reveal.className = "reveal"; reveal.title = "Show / hide";
+    reveal.textContent = "👁";
+    reveal.addEventListener("click", () => {
+      input.type = input.type === "password" ? "text" : "password";
+      input.focus();
+    });
+    row.appendChild(reveal);
+  }
   wrap.appendChild(row);
 
   const hints = [];
   if (hintText) hints.push(hintText);
-  if (Number.isInteger(field.length) && field.length > 0) hints.push(`max ${field.length}`);
+  if (ml) hints.push(`max ${ml}`);
   if (hints.length) {
     const hint = document.createElement("div");
     hint.className = "hint";
@@ -78,11 +160,11 @@ function makeRow(field) {
   }
 
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !multiline) { e.preventDefault(); send(); }
     else if (e.key === "Escape") { e.preventDefault(); cancel(); }
   });
 
-  inputs.push({ selector: field.selector, el: input });
+  inputs.push({ selector: field.selector, el: input, field: kind });
   return wrap;
 }
 
@@ -108,7 +190,7 @@ window.keeper.onRequest((req) => {
 
 function send() {
   if (!currentId) return;
-  const values = inputs.map((i) => ({ selector: i.selector, value: i.el.value }));
+  const values = inputs.map((i) => ({ selector: i.selector, value: submitVal(i.field, i.el.value) }));
   window.keeper.submit(currentId, values);
   inputs.forEach((i) => { i.el.value = ""; }); // don't leave secrets in the DOM
   currentId = null;
