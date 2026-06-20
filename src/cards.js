@@ -39,6 +39,14 @@ export function loadCards() {
   }
 }
 
+// Persist the whole store (chmod 600 — it holds card data).
+export function saveCards(store) {
+  const p = cardsPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(store || {}, null, 2));
+  try { fs.chmodSync(p, 0o600); } catch {}
+}
+
 // Auto-fill on by default when a card exists; opt out with "autofill": false.
 export function autofillEnabled(store) {
   return !!store && store.autofill !== false;

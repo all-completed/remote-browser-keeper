@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues } from "./cards.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -357,6 +357,44 @@ ipcMain.handle("history:screenshot", (_e, id) => {
   } catch { return null; }
 });
 
+// ---------- Cards window (manage saved cards for auto-fill) ----------
+let cardsWin = null;
+function openCardsWindow() {
+  if (cardsWin) { cardsWin.show(); cardsWin.focus(); return; }
+  cardsWin = new BrowserWindow({
+    width: 560,
+    height: 720,
+    resizable: true,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Cards",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "cards-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  cardsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  cardsWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  cardsWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  cardsWin.loadFile(path.join(__dirname, "..", "renderer", "cards.html"));
+  cardsWin.once("ready-to-show", () => { cardsWin.show(); cardsWin.focus(); });
+  cardsWin.on("closed", () => { cardsWin = null; });
+}
+ipcMain.handle("cards:load", () => loadCards());
+ipcMain.handle("cards:save", (_e, store) => {
+  try {
+    if (!store || typeof store !== "object") throw new Error("invalid store");
+    saveCards(store);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ---------- Image viewer (full / natural size) ----------
 let imageWin = null;
 function openImageWindow(dataUrl) {
@@ -422,6 +460,7 @@ function updateTray() {
     // color, so it always looks gray. 🟢/🟡 render in color regardless of state.
     { label: connected ? "🟢 Connected" : "🟡 Reconnecting…", enabled: false },
     { type: "separator" },
+    { label: "Cards…", click: openCardsWindow },
     { label: "History…", click: openHistoryWindow },
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
