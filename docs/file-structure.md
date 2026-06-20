@@ -63,9 +63,9 @@ prod Keeper keep separate stores automatically:
 
 ```
 ~/.remote-browser-keeper/
-├── cards.json                         # OPTIONAL saved cards for card auto-fill (global)
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
+    ├── cards.json                      # OPTIONAL saved cards for card auto-fill
     ├── screenshots/
     │   └── <request_id>.jpg            # proof image for that request
     └── logs/
@@ -85,8 +85,8 @@ prod Keeper keep separate stores automatically:
 
 ### `cards.json` — saved cards for unattended auto-fill (optional)
 
-A **global** file (not per-base-url — a card is the same across service envs):
-`~/.remote-browser-keeper/cards.json`. When the service sends a `request_fill`
+Per-env (like history/logs), so dev test cards and prod cards stay separate:
+`~/.remote-browser-keeper/<base-url>/cards.json`. When the service sends a `request_fill`
 whose fields are **all** `card-*` kinds, the Keeper auto-fills **silently — no
 prompt — only on a site the card is approved for** (per-domain permission). On any
 other site the prompt shows with a **"Use a saved card"** picker and a **"Auto-fill
@@ -113,9 +113,10 @@ zip, state, country } } } }`.
   `"autofill": false`.
 
 > ⚠️ **Security:** this stores card data — including, if present, the **CVV** — in
-> **plaintext** on disk. `chmod 600 ~/.remote-browser-keeper/cards.json`. Only you
-> use this machine; treat it like browser autofill. If you'd rather not store the
-> CVV at rest, omit it and the Keeper will prompt for just the CVV.
+> **plaintext** on disk (`chmod 600`). Only you use this machine; treat it like
+> browser autofill. If you'd rather not store the CVV at rest, omit it and the
+> Keeper will prompt for just the CVV. **Planned:** move card (and secret) data to
+> the **macOS Keychain** (OS-encrypted at rest) — see the service repo `docs/TODO.md`.
 
 ### Electron user-data dir (separate)
 

@@ -26,6 +26,7 @@ function sanitizeForPath(s) {
       .replace(/[^A-Za-z0-9._-]/g, "_") || "default"
   );
 }
+function cardBaseUrl() { return loadConfig().baseUrl; }
 let _dataDir = null;
 function dataDir() {
   if (!_dataDir) {
@@ -222,7 +223,7 @@ function tryAutofillCard(req) {
   const fields = Array.isArray(req.fields) ? req.fields : [];
   if (!isCardOnlyRequest(fields)) return false;
   let store;
-  try { store = loadCards(); } catch { return false; }
+  try { store = loadCards(cardBaseUrl()); } catch { return false; }
   if (!autofillEnabled(store)) return false; // master kill switch
   // Silent fill only on a domain the user has approved for a card.
   const host = hostFromUrl(req.url);
@@ -248,7 +249,7 @@ function showNextPrompt() {
   // cards exist (e.g. auto-fill is off, or a mixed request).
   const hasCardField = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
   let cardOpts = [];
-  if (hasCardField) { try { cardOpts = cardOptions(loadCards()); } catch {} }
+  if (hasCardField) { try { cardOpts = cardOptions(loadCards(cardBaseUrl())); } catch {} }
   const winHeight = Math.min(800, 260 + Math.max(1, fields.length) * 96 + (cardOpts.length ? 72 : 0));
 
   promptWin = new BrowserWindow({
@@ -330,7 +331,7 @@ ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
   try {
     const req = pending.get(request_id);
     if (!req) return [];
-    const card = (loadCards().cards || {})[card_id];
+    const card = (loadCards(cardBaseUrl()).cards || {})[card_id];
     if (!card) return [];
     return mapCardToFields(card, Array.isArray(req.fields) ? req.fields : []);
   } catch {
@@ -345,8 +346,9 @@ ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {})
     if (!req) return { ok: false };
     const host = hostFromUrl(req.url);
     if (!host) return { ok: false };
-    const store = loadCards();
-    if (approveDomain(store, card_id, host)) saveCards(store);
+    const base = cardBaseUrl();
+    const store = loadCards(base);
+    if (approveDomain(store, card_id, host)) saveCards(base, store);
     return { ok: true, host };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -422,11 +424,11 @@ function openCardsWindow() {
   cardsWin.once("ready-to-show", () => { cardsWin.show(); cardsWin.focus(); });
   cardsWin.on("closed", () => { cardsWin = null; });
 }
-ipcMain.handle("cards:load", () => loadCards());
+ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
 ipcMain.handle("cards:save", (_e, store) => {
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");
-    saveCards(store);
+    saveCards(cardBaseUrl(), store);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };

@@ -26,13 +26,22 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export function cardsPath() {
-  return path.join(os.homedir(), ".remote-browser-keeper", "cards.json");
+// Cards are scoped per service base URL (like history/logs), so dev test cards and
+// prod cards stay separate: ~/.remote-browser-keeper/<base-url>/cards.json
+function sanitizeForPath(s) {
+  return String(s || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "")
+    .replace(/[^A-Za-z0-9._-]/g, "_") || "default";
 }
 
-export function loadCards() {
+export function cardsPath(baseUrl) {
+  return path.join(os.homedir(), ".remote-browser-keeper", sanitizeForPath(baseUrl), "cards.json");
+}
+
+export function loadCards(baseUrl) {
   try {
-    const v = JSON.parse(fs.readFileSync(cardsPath(), "utf8"));
+    const v = JSON.parse(fs.readFileSync(cardsPath(baseUrl), "utf8"));
     return v && typeof v === "object" ? v : {};
   } catch {
     return {};
@@ -40,8 +49,8 @@ export function loadCards() {
 }
 
 // Persist the whole store (chmod 600 — it holds card data).
-export function saveCards(store) {
-  const p = cardsPath();
+export function saveCards(baseUrl, store) {
+  const p = cardsPath(baseUrl);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(store || {}, null, 2));
   try { fs.chmodSync(p, 0o600); } catch {}
