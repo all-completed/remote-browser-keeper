@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues, cardOptions, mapCardToFields } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain } from "./cards.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -223,14 +223,16 @@ function tryAutofillCard(req) {
   if (!isCardOnlyRequest(fields)) return false;
   let store;
   try { store = loadCards(); } catch { return false; }
-  if (!autofillEnabled(store)) return false;
-  const card = pickCard(store);
-  if (!card) return false;
+  if (!autofillEnabled(store)) return false; // master kill switch
+  // Silent fill only on a domain the user has approved for a card.
+  const host = hostFromUrl(req.url);
+  const card = findCardForDomain(store, host);
+  if (!card) return false; // not approved for this site → fall through to the prompt
   const values = buildCardValues(fields, card);
   if (!values) return false; // card can't fully satisfy it — let the user fill
   safeSend({ type: "fill_response", request_id: req.request_id, values });
   recordHistory(req, "autofilled");
-  console.log("[keeper] card autofill ->", fields.length, "field(s) for session", req.session_id || "?");
+  console.log("[keeper] card autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
   return true;
 }
 
@@ -287,6 +289,7 @@ function showNextPrompt() {
       screenshot: req.screenshot || null, // single proof image for the request
       fields,                         // [{selector,label,field,length,format}]
       cards: cardOpts,                // [{id,isDefault}] for the saved-card picker
+      host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
     });
     promptWin.show();
     promptWin.focus();
@@ -332,6 +335,21 @@ ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
     return mapCardToFields(card, Array.isArray(req.fields) ? req.fields : []);
   } catch {
     return [];
+  }
+});
+// "Auto-fill on this site next time": approve the request's domain for the chosen
+// card and persist it. Future requests from that domain fill silently.
+ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {}) => {
+  try {
+    const req = pending.get(request_id);
+    if (!req) return { ok: false };
+    const host = hostFromUrl(req.url);
+    if (!host) return { ok: false };
+    const store = loadCards();
+    if (approveDomain(store, card_id, host)) saveCards(store);
+    return { ok: true, host };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 });
 

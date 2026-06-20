@@ -87,13 +87,23 @@ prod Keeper keep separate stores automatically:
 
 A **global** file (not per-base-url — a card is the same across service envs):
 `~/.remote-browser-keeper/cards.json`. When the service sends a `request_fill`
-whose fields are **all** `card-*` kinds, the Keeper answers it **automatically from
-the saved card — no prompt** — mapping each field (+ its `format`) to the card.
+whose fields are **all** `card-*` kinds, the Keeper auto-fills **silently — no
+prompt — only on a site the card is approved for** (per-domain permission). On any
+other site the prompt shows with a **"Use a saved card"** picker and a **"Auto-fill
+on this site next time"** checkbox; ticking it records the domain on that card.
 The proof screenshot + field metadata are still recorded in history (outcome
 `autofilled`); card **values are never logged**. Copy [`cards.example.json`](../cards.example.json)
-and edit. Shape: `{ autofill, default, cards: { <id>: { holder, number, cvv,
-exp_month, exp_year, billing: { address_line1, address_line2, city, zip, state,
-country } } } }`.
+and edit, or manage cards (and their approved sites) from the tray **Cards…** window.
+Shape: `{ autofill, default, cards: { <id>: { holder, number, cvv, exp_month,
+exp_year, domains: ["amazon.com"], billing: { address_line1, address_line2, city,
+zip, state, country } } } }`.
+
+- **`domains`** — sites this card auto-fills on without a prompt. Matched against
+  the request URL's host (`www.` stripped; a parent domain like `shop.com` also
+  covers its subdomains). Empty/absent → the card is never silent; it's only
+  offered in the picker.
+- **`autofill: false`** — a master kill switch: never auto-fill silently, even on
+  approved domains (the picker still works).
 
 - `card-exp` is rendered to the request's template (`MM/YY`, `MM/YYYY`, `YY`, `MM`).
 - `card-billing-address` maps by `format` (`ZIP`/`STATE`/…); no format → the whole

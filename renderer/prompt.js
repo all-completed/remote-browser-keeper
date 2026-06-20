@@ -1,5 +1,7 @@
 let currentId = null;
 let inputs = []; // [{ selector, el }]
+let pickedCardId = null;  // saved card chosen in the picker (for "remember this site")
+let rememberEl = null;    // the "auto-fill on this site next time" checkbox
 
 const $ = (id) => document.getElementById(id);
 const fieldsEl = $("fields");
@@ -204,6 +206,8 @@ function makeRow(field) {
 window.keeper.onRequest((req) => {
   currentId = req.request_id;
   inputs = [];
+  pickedCardId = null;
+  rememberEl = null;
   fieldsEl.replaceChildren();
 
   sessionEl.textContent = `session: ${req.session_id || "?"}`;
@@ -245,11 +249,28 @@ function makeCardPicker(req) {
     o.value = c.id; o.textContent = c.id + (c.isDefault ? " (default)" : "");
     sel.appendChild(o);
   }
+  wrap.appendChild(sel);
+
+  // "Auto-fill on this site next time" — records the request's domain for the
+  // chosen card so future requests from it fill silently. Shown once a card is picked.
+  const remember = document.createElement("label");
+  remember.className = "rememberRow";
+  remember.hidden = true;
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  const txt = document.createElement("span");
+  txt.textContent = req.host ? `Auto-fill on ${req.host} next time` : "Auto-fill on this site next time";
+  remember.appendChild(cb);
+  remember.appendChild(txt);
+  rememberEl = cb;
+  wrap.appendChild(remember);
+
   sel.addEventListener("change", async () => {
-    const id = sel.value;
-    if (!id) return; // manual — leave fields as-is
+    pickedCardId = sel.value || null;
+    remember.hidden = !pickedCardId;
+    if (!pickedCardId) return; // manual — leave fields as-is
     let values = [];
-    try { values = await window.keeper.cardValues(req.request_id, id); } catch {}
+    try { values = await window.keeper.cardValues(req.request_id, pickedCardId); } catch {}
     for (const v of values || []) {
       const item = inputs.find((i) => i.selector === v.selector);
       if (item) {
@@ -258,12 +279,15 @@ function makeCardPicker(req) {
       }
     }
   });
-  wrap.appendChild(sel);
   return wrap;
 }
 
 function send() {
   if (!currentId) return;
+  // Approve this site for the chosen card if "remember" is ticked (fire-and-forget).
+  if (pickedCardId && rememberEl && rememberEl.checked) {
+    try { window.keeper.rememberCardDomain(currentId, pickedCardId); } catch {}
+  }
   const values = inputs.map((i) => ({ selector: i.selector, value: submitVal(i.field, i.el.value) }));
   window.keeper.submit(currentId, values);
   inputs.forEach((i) => { i.el.value = ""; }); // don't leave secrets in the DOM

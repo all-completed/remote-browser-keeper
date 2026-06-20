@@ -37,6 +37,7 @@ function loadCardIntoForm(id) {
   $("f_year").value = c.exp_year || "";
   const b = c.billing || {};
   for (const [el, key] of Object.entries(BILLING)) $(el).value = b[key] || "";
+  $("f_domains").value = (Array.isArray(c.domains) ? c.domains : []).join("\n");
   $("f_default").checked = store.default === id;
 }
 
@@ -46,12 +47,15 @@ function commitForm() {
   let newId = ($("f_id").value || "").trim() || currentId;
   const billing = {};
   for (const [el, key] of Object.entries(BILLING)) billing[key] = $(el).value;
+  const domains = $("f_domains").value
+    .split(/[\n,]+/).map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "")).filter(Boolean);
   const card = {
     holder: $("f_holder").value,
     number: $("f_number").value,
     cvv: $("f_cvv").value,
     exp_month: $("f_month").value,
     exp_year: $("f_year").value,
+    domains,
     billing,
   };
   if (newId !== currentId) {
@@ -76,7 +80,7 @@ function setStatus(msg, kind) {
 }
 
 // ---- wiring ----
-for (const el of document.querySelectorAll("#form input")) {
+for (const el of document.querySelectorAll("#form input, #form textarea")) {
   el.addEventListener("input", () => { commitForm(); renderSelect(); setStatus("Unsaved changes"); });
 }
 $("autofill").addEventListener("change", () => { store.autofill = $("autofill").checked; setStatus("Unsaved changes"); });

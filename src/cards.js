@@ -68,6 +68,40 @@ export function pickCard(store) {
   return cards[id] || null;
 }
 
+// ---- Per-domain auto-fill permission (stored on the card as `domains`) ----
+// A card is auto-filled silently only on domains the user has approved for it;
+// otherwise the prompt shows (with the picker + a "remember this site" option).
+export function hostFromUrl(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ""); }
+  catch { return ""; }
+}
+function domainMatches(approved, host) {
+  const a = String(approved || "").toLowerCase().replace(/^www\./, "");
+  return !!a && !!host && (host === a || host.endsWith("." + a));
+}
+// The card approved to auto-fill on `host`, or null. (default card preferred.)
+export function findCardForDomain(store, host) {
+  const cards = (store && store.cards) || {};
+  if (!host) return null;
+  const ids = Object.keys(cards);
+  const ordered = store && store.default && cards[store.default]
+    ? [store.default, ...ids.filter((i) => i !== store.default)] : ids;
+  for (const id of ordered) {
+    const doms = Array.isArray(cards[id].domains) ? cards[id].domains : [];
+    if (doms.some((d) => domainMatches(d, host))) return cards[id];
+  }
+  return null;
+}
+// Record approval for `host` on a card (caller persists the store). Returns true if changed.
+export function approveDomain(store, cardId, host) {
+  const card = ((store && store.cards) || {})[cardId];
+  if (!card || !host) return false;
+  if (!Array.isArray(card.domains)) card.domains = [];
+  if (card.domains.includes(host)) return false;
+  card.domains.push(host);
+  return true;
+}
+
 const CARD_EXP_DEFAULT = "MM/YY";
 function cardExpTemplate(format) {
   return format && /[MY]/i.test(format) ? format : CARD_EXP_DEFAULT;

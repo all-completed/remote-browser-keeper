@@ -8,6 +8,7 @@
       "cvv": "123",
       "exp_month": "12",
       "exp_year": "2028",
+      "domains": ["amazon.com"],
       "billing": {
         "address_line1": "1 Main St",
         "address_line2": "",

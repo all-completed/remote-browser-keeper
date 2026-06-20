@@ -87,6 +87,8 @@ body {
   border: 1px solid var(--border2); border-radius: 9px; outline: none;
 }
 .cardSelect:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
+.rememberRow { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted2); cursor: pointer; }
+.rememberRow input { width: 14px; height: 14px; }
 .inputRow input::placeholder, .inputRow textarea::placeholder { color: var(--muted2); }
 .inputRow input:focus, .inputRow textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
 .reveal {

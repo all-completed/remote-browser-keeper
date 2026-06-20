@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld("keeper", {
   submit: (request_id, values) => ipcRenderer.send("keeper:submit", { request_id, values }),
   cancel: (request_id) => ipcRenderer.send("keeper:cancel", { request_id }),
   cardValues: (request_id, card_id) => ipcRenderer.invoke("keeper:card-values", { request_id, card_id }),
+  rememberCardDomain: (request_id, card_id) => ipcRenderer.invoke("keeper:remember-card-domain", { request_id, card_id }),
   viewImage: (dataUrl) => ipcRenderer.send("keeper:view-image", dataUrl),
 });
