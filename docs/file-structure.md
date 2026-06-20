@@ -117,11 +117,14 @@ zip, state, country } } } }`.
   instead** (e.g. omit `cvv` to be asked for it each time). Disable entirely with
   `"autofill": false`.
 
-> ⚠️ **Security:** this stores card data — including, if present, the **CVV** — in
-> **plaintext** on disk (`chmod 600`). Only you use this machine; treat it like
-> browser autofill. If you'd rather not store the CVV at rest, omit it and the
-> Keeper will prompt for just the CVV. **Planned:** move card (and secret) data to
-> the **macOS Keychain** (OS-encrypted at rest) — see the service repo `docs/TODO.md`.
+> 🔒 **At rest:** on **macOS**, `cards.json` is **OS-encrypted** — the contents are an
+> envelope encrypted with a key in the **Keychain** (Electron `safeStorage`, "once
+> forever" — reads don't re-prompt), so the CVV/number aren't readable on disk. On
+> other platforms it falls back to a `chmod 600` plaintext file. Reads handle both,
+> so an existing plaintext file **auto-migrates** to encrypted on the next save. If
+> you'd still rather not keep the CVV at rest, omit it and the Keeper prompts for it.
+> (Secrets — `secrets.json` — stay a filesystem vault for now; they're provisioned by
+> an external script. See the service repo `docs/TODO.md`.)
 
 ### Electron user-data dir (separate)
 

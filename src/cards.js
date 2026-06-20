@@ -22,12 +22,14 @@
 //       }
 //     }
 //   }
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readJson, writeJson } from "./securestore.js";
 
 // Cards are scoped per service base URL (like history/logs), so dev test cards and
 // prod cards stay separate: ~/.remote-browser-keeper/<base-url>/cards.json
+// At rest the file is OS-encrypted on macOS (Keychain via safeStorage), plaintext
+// elsewhere — see securestore.js. Existing plaintext files migrate on next save.
 function sanitizeForPath(s) {
   return String(s || "")
     .replace(/^https?:\/\//, "")
@@ -40,20 +42,13 @@ export function cardsPath(baseUrl) {
 }
 
 export function loadCards(baseUrl) {
-  try {
-    const v = JSON.parse(fs.readFileSync(cardsPath(baseUrl), "utf8"));
-    return v && typeof v === "object" ? v : {};
-  } catch {
-    return {};
-  }
+  const v = readJson(cardsPath(baseUrl));
+  return v && typeof v === "object" ? v : {};
 }
 
-// Persist the whole store (chmod 600 — it holds card data).
+// Persist the whole store (OS-encrypted on macOS, chmod 600).
 export function saveCards(baseUrl, store) {
-  const p = cardsPath(baseUrl);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(store || {}, null, 2));
-  try { fs.chmodSync(p, 0o600); } catch {}
+  writeJson(cardsPath(baseUrl), store || {});
 }
 
 // Auto-fill on by default when a card exists; opt out with "autofill": false.
