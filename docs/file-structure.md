@@ -63,6 +63,7 @@ prod Keeper keep separate stores automatically:
 
 ```
 ~/.remote-browser-keeper/
+├── cards.json                         # OPTIONAL saved cards for card auto-fill (global)
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
     ├── screenshots/
@@ -75,12 +76,36 @@ prod Keeper keep separate stores automatically:
   replaced (`https://rb.dev.example.com` → `rb.dev.example.com`).
 - **`history.jsonl`** — one JSON object per line, **never containing values**:
   `request_id`, `session_id`, `url`, `requested_at`, `resolved_at`,
-  `outcome` (`submitted` | `cancelled`), a `screenshot` path, and per-field
-  metadata (`selector`, `label`, `field`, `length`, `format`). Eviction runs on
-  every write: keep the most recent **2000** entries and drop anything older than
-  **~6 months**.
+  `outcome` (`submitted` | `cancelled` | `autofilled`), a `screenshot` path, and
+  per-field metadata (`selector`, `label`, `field`, `length`, `format`). Eviction
+  runs on every write: keep the most recent **2000** entries and drop anything
+  older than **~6 months**.
 - **`screenshots/<request_id>.jpg`** — the same proof image the prompt showed.
   Evicted together with its history entry (orphans are reconciled on each write).
+
+### `cards.json` — saved cards for unattended auto-fill (optional)
+
+A **global** file (not per-base-url — a card is the same across service envs):
+`~/.remote-browser-keeper/cards.json`. When the service sends a `request_fill`
+whose fields are **all** `card-*` kinds, the Keeper answers it **automatically from
+the saved card — no prompt** — mapping each field (+ its `format`) to the card.
+The proof screenshot + field metadata are still recorded in history (outcome
+`autofilled`); card **values are never logged**. Copy [`cards.example.json`](../cards.example.json)
+and edit. Shape: `{ autofill, default, cards: { <id>: { holder, number, cvv,
+exp_month, exp_year, billing: { address_line1, address_line2, city, zip, state,
+country } } } }`.
+
+- `card-exp` is rendered to the request's template (`MM/YY`, `MM/YYYY`, `YY`, `MM`).
+- `card-billing-address` maps by `format` (`ZIP`/`STATE`/…); no format → the whole
+  address joined.
+- If a **core** value (number/cvv/exp/holder) is missing, the Keeper **prompts
+  instead** (e.g. omit `cvv` to be asked for it each time). Disable entirely with
+  `"autofill": false`.
+
+> ⚠️ **Security:** this stores card data — including, if present, the **CVV** — in
+> **plaintext** on disk. `chmod 600 ~/.remote-browser-keeper/cards.json`. Only you
+> use this machine; treat it like browser autofill. If you'd rather not store the
+> CVV at rest, omit it and the Keeper will prompt for just the CVV.
 
 ### Electron user-data dir (separate)
 

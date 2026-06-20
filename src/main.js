@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
+import { loadCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues } from "./cards.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +168,7 @@ function connect() {
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
     if (msg.type === "fill_request" && msg.request_id) {
       msg._requested_at = new Date().toISOString();
+      if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
       pending.set(msg.request_id, msg);
       queue.push(msg.request_id);
       showNextPrompt();
@@ -210,6 +212,26 @@ function handleSecretRequest(msg) {
     safeSend({ type: "secret_response", request_id: msg.request_id, denied: true });
     console.warn("[keeper] secret_request", sidShort, "-> not in vault, denied");
   }
+}
+
+// Unattended card fill: if every requested field is a card-* kind and a saved
+// card can satisfy it, answer automatically (no prompt) from cards.json. History
+// (proof screenshot + field metadata, never values) is still recorded. Returns
+// true when handled; false falls through to the normal prompt.
+function tryAutofillCard(req) {
+  const fields = Array.isArray(req.fields) ? req.fields : [];
+  if (!isCardOnlyRequest(fields)) return false;
+  let store;
+  try { store = loadCards(); } catch { return false; }
+  if (!autofillEnabled(store)) return false;
+  const card = pickCard(store);
+  if (!card) return false;
+  const values = buildCardValues(fields, card);
+  if (!values) return false; // card can't fully satisfy it — let the user fill
+  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  recordHistory(req, "autofilled");
+  console.log("[keeper] card autofill ->", fields.length, "field(s) for session", req.session_id || "?");
+  return true;
 }
 
 // ---------- Prompt window ----------

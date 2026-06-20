@@ -1,0 +1,21 @@
+{
+  "autofill": true,
+  "default": "visa",
+  "cards": {
+    "visa": {
+      "holder": "JOHN Q DOE",
+      "number": "4111111111111111",
+      "cvv": "123",
+      "exp_month": "12",
+      "exp_year": "2028",
+      "billing": {
+        "address_line1": "1 Main St",
+        "address_line2": "",
+        "city": "Springfield",
+        "zip": "90210",
+        "state": "CA",
+        "country": "US"
+      }
+    }
+  }
+}
