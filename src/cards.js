@@ -106,6 +106,22 @@ export function cardValueForField(field, format, card) {
   }
 }
 
+// Card ids for the prompt's "use a saved card" picker (no values).
+export function cardOptions(store) {
+  const cards = (store && store.cards) || {};
+  const def = store && store.default;
+  return Object.keys(cards).map((id) => ({ id, isDefault: id === def }));
+}
+
+// Map a card onto a request's fields for the picker — fills whatever it can
+// (empties allowed); the user reviews/edits before sending.
+export function mapCardToFields(card, fields) {
+  if (!card || !Array.isArray(fields)) return [];
+  return fields
+    .map((f) => ({ selector: f && f.selector, value: cardValueForField(f && f.field, f && f.format, card) }))
+    .filter((v) => v.selector && v.value != null);
+}
+
 // Build {selector,value}[] for a card-only request, or null if the card can't
 // satisfy it (missing a core value other than billing) — caller then prompts.
 export function buildCardValues(fields, card) {

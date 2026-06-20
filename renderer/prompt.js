@@ -216,10 +216,51 @@ window.keeper.onRequest((req) => {
   } else { proofImg.removeAttribute("src"); proofEl.hidden = true; }
 
   const fields = Array.isArray(req.fields) ? req.fields : [];
+  const hasCard = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
+  if (hasCard && Array.isArray(req.cards) && req.cards.length) {
+    fieldsEl.appendChild(makeCardPicker(req));
+  }
   for (const f of fields) fieldsEl.appendChild(makeRow(f));
 
   setTimeout(() => { if (inputs[0]) inputs[0].el.focus(); }, 0);
 });
+
+// "Use a saved card or fill manually" — picking a card pre-fills the card fields
+// (via main; values stay local), which the user then reviews and sends.
+function makeCardPicker(req) {
+  const wrap = document.createElement("div");
+  wrap.className = "field cardPicker";
+  const label = document.createElement("label");
+  label.className = "flabel";
+  label.textContent = "Use a saved card";
+  wrap.appendChild(label);
+
+  const sel = document.createElement("select");
+  sel.className = "cardSelect";
+  const manual = document.createElement("option");
+  manual.value = ""; manual.textContent = "— Fill manually —";
+  sel.appendChild(manual);
+  for (const c of req.cards) {
+    const o = document.createElement("option");
+    o.value = c.id; o.textContent = c.id + (c.isDefault ? " (default)" : "");
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", async () => {
+    const id = sel.value;
+    if (!id) return; // manual — leave fields as-is
+    let values = [];
+    try { values = await window.keeper.cardValues(req.request_id, id); } catch {}
+    for (const v of values || []) {
+      const item = inputs.find((i) => i.selector === v.selector);
+      if (item) {
+        item.el.value = v.value;
+        item.el.dispatchEvent(new Event("input", { bubbles: true })); // let the field re-format
+      }
+    }
+  });
+  wrap.appendChild(sel);
+  return wrap;
+}
 
 function send() {
   if (!currentId) return;

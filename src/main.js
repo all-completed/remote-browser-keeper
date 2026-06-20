@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, pickCard, buildCardValues, cardOptions, mapCardToFields } from "./cards.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -242,7 +242,12 @@ function showNextPrompt() {
   if (!req) { queue.shift(); return showNextPrompt(); }
 
   const fields = Array.isArray(req.fields) ? req.fields : [];
-  const winHeight = Math.min(760, 260 + Math.max(1, fields.length) * 96);
+  // Offer a "use a saved card" picker when the request has any card field and
+  // cards exist (e.g. auto-fill is off, or a mixed request).
+  const hasCardField = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
+  let cardOpts = [];
+  if (hasCardField) { try { cardOpts = cardOptions(loadCards()); } catch {} }
+  const winHeight = Math.min(800, 260 + Math.max(1, fields.length) * 96 + (cardOpts.length ? 72 : 0));
 
   promptWin = new BrowserWindow({
     width: 480,
@@ -281,6 +286,7 @@ function showNextPrompt() {
       message: req.message || null,   // LLM's explanation of why
       screenshot: req.screenshot || null, // single proof image for the request
       fields,                         // [{selector,label,field,length,format}]
+      cards: cardOpts,                // [{id,isDefault}] for the saved-card picker
     });
     promptWin.show();
     promptWin.focus();
@@ -313,6 +319,20 @@ ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
 });
 ipcMain.on("keeper:cancel", (_e, { request_id }) => {
   resolveRequest(request_id, { cancelled: true });
+});
+// Prompt asks for a saved card's values mapped onto the pending request's fields
+// (when the user picks a card to pre-fill). Values stay local; the user reviews
+// and sends. Returns [{selector,value}].
+ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
+  try {
+    const req = pending.get(request_id);
+    if (!req) return [];
+    const card = (loadCards().cards || {})[card_id];
+    if (!card) return [];
+    return mapCardToFields(card, Array.isArray(req.fields) ? req.fields : []);
+  } catch {
+    return [];
+  }
 });
 
 // ---------- History window ----------

@@ -80,6 +80,13 @@ body {
   -webkit-user-select: text; user-select: text;
 }
 .inputRow textarea { resize: vertical; min-height: 64px; font-family: inherit; }
+.cardPicker { border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.cardSelect {
+  width: 100%; padding: 10px 12px; font-size: 14px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border2); border-radius: 9px; outline: none;
+}
+.cardSelect:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
 .inputRow input::placeholder, .inputRow textarea::placeholder { color: var(--muted2); }
 .inputRow input:focus, .inputRow textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
 .reveal {
