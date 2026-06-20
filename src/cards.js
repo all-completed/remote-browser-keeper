@@ -28,8 +28,9 @@ import { readJson, writeJson } from "./securestore.js";
 
 // Cards are scoped per service base URL (like history/logs), so dev test cards and
 // prod cards stay separate: ~/.remote-browser-keeper/<base-url>/cards.json
-// At rest the file is OS-encrypted on macOS (Keychain via safeStorage), plaintext
-// elsewhere — see securestore.js. Existing plaintext files migrate on next save.
+// At rest the file is OS-encrypted via safeStorage (macOS Keychain / Windows DPAPI
+// / Linux libsecret); plaintext only where no backend exists — see securestore.js.
+// Existing plaintext files migrate on next save.
 function sanitizeForPath(s) {
   return String(s || "")
     .replace(/^https?:\/\//, "")

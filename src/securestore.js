@@ -1,11 +1,13 @@
 // Encrypted-at-rest JSON storage for sensitive keeper data (cards).
 //
-// On macOS (and any OS where Electron `safeStorage` is available) the JSON is
-// encrypted with an OS-managed key kept in the **Keychain** — "Once forever":
-// a signed/stable app is on the key's ACL, so reads decrypt without re-prompting,
-// every launch. On other platforms (or outside Electron) it falls back to a
-// plaintext file. Reads transparently handle both, so existing plaintext files
-// auto-migrate to encrypted on the next write.
+// Uses Electron `safeStorage`, which encrypts with the OS secret store wherever a
+// backend exists:
+//   - macOS   → Keychain (prompts once, "Always Allow" → silent thereafter)
+//   - Windows → DPAPI (per-user, transparent — no prompt)
+//   - Linux   → libsecret (gnome-keyring / kwallet) when present
+// Only where no backend is available (e.g. headless Linux, or outside Electron)
+// does it fall back to a plaintext file. Reads transparently handle both, so an
+// existing plaintext file auto-migrates to encrypted on the next write.
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";

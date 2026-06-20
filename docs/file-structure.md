@@ -117,14 +117,16 @@ zip, state, country } } } }`.
   instead** (e.g. omit `cvv` to be asked for it each time). Disable entirely with
   `"autofill": false`.
 
-> 🔒 **At rest:** on **macOS**, `cards.json` is **OS-encrypted** — the contents are an
-> envelope encrypted with a key in the **Keychain** (Electron `safeStorage`, "once
-> forever" — reads don't re-prompt), so the CVV/number aren't readable on disk. On
-> other platforms it falls back to a `chmod 600` plaintext file. Reads handle both,
-> so an existing plaintext file **auto-migrates** to encrypted on the next save. If
-> you'd still rather not keep the CVV at rest, omit it and the Keeper prompts for it.
-> (Secrets — `secrets.json` — stay a filesystem vault for now; they're provisioned by
-> an external script. See the service repo `docs/TODO.md`.)
+> 🔒 **At rest:** `cards.json` is **OS-encrypted** wherever a secure backend exists
+> (Electron `safeStorage`): **macOS Keychain** (prompts once, "Always Allow" → silent
+> thereafter), **Windows DPAPI** (per-user, no prompt), **Linux libsecret** (gnome-keyring
+> / kwallet). The contents become an encrypted envelope, so the CVV/number aren't
+> readable on disk. Only where there's **no backend** (e.g. headless Linux) does it
+> fall back to a `chmod 600` plaintext file. Reads handle both, so an existing plaintext
+> file **auto-migrates** to encrypted on the next save. If you'd still rather not keep
+> the CVV at rest, omit it and the Keeper prompts for it. (Secrets — `secrets.json` —
+> stay a filesystem vault for now; they're provisioned by an external script. See the
+> service repo `docs/TODO.md`.)
 
 ### Electron user-data dir (separate)
 
