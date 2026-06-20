@@ -70,6 +70,7 @@ prod Keeper keep separate stores automatically:
 ~/.remote-browser-keeper/
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
+    ├── secrets.json                    # session-unlock secrets (by secret_id)
     ├── cards.json                      # OPTIONAL saved cards for card auto-fill
     ├── screenshots/
     │   └── <request_id>.jpg            # proof image for that request
@@ -87,6 +88,34 @@ prod Keeper keep separate stores automatically:
   older than **~6 months**.
 - **`screenshots/<request_id>.jpg`** — the same proof image the prompt showed.
   Evicted together with its history entry (orphans are reconciled on each write).
+
+## Sensitive data — secrets & cards
+
+The Keeper holds two kinds of sensitive data, both **per service base URL** (so dev
+and prod are isolated) under `~/.remote-browser-keeper/<base-url>/`:
+
+| | `secrets.json` | `cards.json` |
+|---|---|---|
+| **What** | session-encryption secrets, keyed by `secret_id` (`= sha256(secret)`) | saved payment cards for auto-fill |
+| **Used for** | answering the service's `secret_request` to unlock encrypted sessions (zero-knowledge) | unattended/assisted card `request_fill` |
+| **Written by** | external script `scripts/export_session_secret.py` (service repo) | the tray **Cards…** window (or hand-edit) |
+| **At rest** | **plaintext** file, `chmod 600` *(for now)* | **OS-encrypted** via `safeStorage` where a backend exists, else plaintext `chmod 600` |
+| **Leaves the machine?** | only the secret value, over the authenticated Keeper WS, when the service asks for that `secret_id` | only field values, over the same WS, into the page; never logged |
+
+### `secrets.json` — session-unlock secrets
+
+`~/.remote-browser-keeper/<base-url>/secrets.json`, `chmod 600`. Shape:
+`{ base_url, secrets: { <secret_id>: { secret, label, user_id, source } } }` where
+`secret_id = sha256(secret)`. When the service sends a `secret_request` for a
+`secret_id` (reopening an encrypted session without the API-key secret), the Keeper
+looks it up here, verifies `sha256(secret) == secret_id`, and returns the secret
+over the WS. The service holds it **in memory only** for the session and never logs it.
+
+Provisioned by the service repo's `scripts/export_session_secret.py` (it extracts the
+secret from an API key and writes it here). Because that external writer can't use
+Electron `safeStorage`, `secrets.json` stays **plaintext at rest for now** — only the
+file permissions protect it. **Planned:** move provisioning into the Keeper so secrets
+get the same OS encryption as cards (service repo `docs/TODO.md`).
 
 ### `cards.json` — saved cards for unattended auto-fill (optional)
 
