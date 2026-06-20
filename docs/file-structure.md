@@ -5,10 +5,15 @@ writes on your machine.
 
 ## Source tree
 
+Repository: **https://github.com/all-completed/remote-browser-keeper** (public).
+
 ```
 remote-browser-keeper/
-├── package.json            # Electron app manifest + scripts (npm start)
+├── package.json            # Electron app manifest + scripts (start, dist) + electron-builder config
 ├── README.md
+├── .github/
+│   └── workflows/
+│       └── build.yml       # CI: build desktop artifacts for every OS + arch
 ├── docs/
 │   └── file-structure.md   # this file
 ├── src/                    # Electron main process + preload bridges (Node side)
@@ -150,6 +155,23 @@ RBS_URL=https://rb.example.com \
   nohup ./node_modules/.bin/electron . --user-data-dir="$HOME/Library/Application Support/remote-browser-keeper-prod" \
   > ~/.remote-browser-keeper/rb.example.com/logs/keeper.log 2>&1 < /dev/null & disown
 ```
+
+## Builds & CI
+
+The repo is **[all-completed/remote-browser-keeper](https://github.com/all-completed/remote-browser-keeper)**.
+[`.github/workflows/build.yml`](../.github/workflows/build.yml) packages the app
+with **electron-builder** on a 3-runner matrix, each producing both architectures
+(artifacts are **unsigned** in CI):
+
+| Runner | Targets | Arches |
+| --- | --- | --- |
+| `macos-14` | `dmg`, `zip` | x64 (Intel), arm64 (Apple Silicon) |
+| `ubuntu-latest` | `AppImage`, `tar.gz` | x64, arm64 |
+| `windows-latest` | `nsis` installer, `portable` | x64, arm64 |
+
+Each job uploads a `remote-browser-keeper-<platform>` artifact. The build runs on
+every branch push and via **workflow_dispatch**. Locally: `npm run dist` (current
+OS). electron-builder config lives in `package.json` under `build`.
 
 ## Related
 
