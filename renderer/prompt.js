@@ -29,49 +29,81 @@ function isSecret(field) {
   );
 }
 
-function isMultiline(field) {
-  return String(field || "").toLowerCase() === "card-billing-address";
+// ---- Card formatting templates ----
+// A template has slot chars (letters or '#') with literal separators (space, '/').
+const CARD_NUMBER_DEFAULT = "################"; // 16 digits, no grouping
+const CARD_EXP_DEFAULT = "MM/YY";
+
+function templateSlots(t) {
+  return (String(t).match(/[A-Za-z#]/g) || []).length;
+}
+function fillTemplate(template, raw) {
+  const digits = String(raw).replace(/\D/g, "").slice(0, templateSlots(template));
+  let out = "";
+  let di = 0;
+  for (const ch of String(template)) {
+    if (/[A-Za-z#]/.test(ch)) {
+      if (di < digits.length) out += digits[di++]; else break;
+    } else if (di < digits.length) {
+      out += ch;
+    } else break;
+  }
+  return out;
+}
+function cardNumberMask(format) {
+  return format && format.indexOf("#") >= 0 ? format : CARD_NUMBER_DEFAULT;
+}
+function cardExpTemplate(format) {
+  return format && /[MY]/i.test(format) ? format : CARD_EXP_DEFAULT;
 }
 
-function cardMaxLen(field) {
+const BILLING_TOKENS = {
+  ADDRESS_LINE1: "address line 1", ADDRESS_LINE2: "address line 2",
+  CITY: "city", ZIP: "ZIP", STATE: "state", COUNTRY: "country",
+};
+function humanizeBilling(format) {
+  if (!format) return "";
+  return String(format).split(",")
+    .map((t) => BILLING_TOKENS[t.trim().toUpperCase()] || t.trim())
+    .filter(Boolean).join(", ");
+}
+
+// Multi-line only for a whole billing address (no specific component format).
+function isMultiline(field, format) {
+  return String(field || "").toLowerCase() === "card-billing-address" && !(format && String(format).trim());
+}
+
+function cardMaxLen(field, format) {
   switch (String(field || "").toLowerCase()) {
-    case "card-number": return 23; // up to 19 digits + grouping spaces
+    case "card-number": return cardNumberMask(format).length;
+    case "card-exp": return cardExpTemplate(format).length;
     case "card-cvv": return 4;
-    case "card-exp": return 5; // MM/YY
     default: return 0;
   }
 }
 
-// Transform input for the digit-grouped/MM-YY card fields; null = not such a field.
-function formatCardInput(field, raw) {
+// Transform input for digit-grouped/MM-YY card fields; null = not such a field.
+function formatCardInput(field, format, raw) {
   switch (String(field || "").toLowerCase()) {
-    case "card-number": {
-      const d = raw.replace(/\D/g, "").slice(0, 19);
-      return d.replace(/(.{4})/g, "$1 ").trim();
-    }
-    case "card-exp": {
-      const d = raw.replace(/\D/g, "").slice(0, 4);
-      return d.length <= 2 ? d : d.slice(0, 2) + "/" + d.slice(2);
-    }
-    case "card-cvv":
-      return raw.replace(/\D/g, "").slice(0, 4);
-    default:
-      return null;
+    case "card-number": return fillTemplate(cardNumberMask(format), raw);
+    case "card-exp": return fillTemplate(cardExpTemplate(format), raw);
+    case "card-cvv": return String(raw).replace(/\D/g, "").slice(0, 4);
+    default: return null;
   }
 }
 
 // Value to submit (card number is grouped for display; send digits only).
 function submitVal(field, v) {
-  return String(field || "").toLowerCase() === "card-number" ? v.replace(/\s+/g, "") : v;
+  return String(field || "").toLowerCase() === "card-number" ? String(v).replace(/\D/g, "") : v;
 }
 
-function cardHint(field) {
+function cardHint(field, format) {
   switch (String(field || "").toLowerCase()) {
     case "card-number": return "card number · digits only";
     case "card-cvv": return "CVV";
-    case "card-exp": return "MM/YY";
+    case "card-exp": return cardExpTemplate(format);
     case "card-holder-name": return "name on card";
-    case "card-billing-address": return "billing address";
+    case "card-billing-address": return humanizeBilling(format) || "billing address";
     default: return "";
   }
 }
@@ -103,7 +135,8 @@ function makeRow(field) {
   row.className = "inputRow";
 
   const kind = String(field.field || "").toLowerCase();
-  const multiline = isMultiline(kind);
+  const fmt = field.format;
+  const multiline = isMultiline(kind, fmt);
   const secret = isSecret(kind);
 
   let input;
@@ -119,19 +152,19 @@ function makeRow(field) {
   input.autocomplete = "off"; input.autocorrect = "off"; input.spellcheck = false;
   input.placeholder = "Type here…";
 
-  const ml = (Number.isInteger(field.length) && field.length > 0) ? field.length : cardMaxLen(kind);
+  const ml = (Number.isInteger(field.length) && field.length > 0) ? field.length : cardMaxLen(kind, fmt);
   if (ml) input.maxLength = ml;
 
   // Field-specific formatting + hint.
   let hintText = "";
-  if (formatCardInput(kind, "") !== null) {
+  if (formatCardInput(kind, fmt, "") !== null) {
     // card-number / card-exp / card-cvv: live digit-grouping / MM-YY.
     input.inputMode = "numeric";
-    input.addEventListener("input", () => { input.value = formatCardInput(kind, input.value); });
-    hintText = cardHint(kind);
+    input.addEventListener("input", () => { input.value = formatCardInput(kind, fmt, input.value); });
+    hintText = cardHint(kind, fmt);
   } else if (kind.startsWith("card-")) {
     // card-holder-name / card-billing-address: no transform, just a hint.
-    hintText = cardHint(kind);
+    hintText = cardHint(kind, fmt);
   } else {
     hintText = applyFormat(input, field.format);
   }
