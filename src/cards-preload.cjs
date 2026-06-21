@@ -6,4 +6,5 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("keeperCards", {
   load: () => ipcRenderer.invoke("cards:load"),
   save: (store) => ipcRenderer.invoke("cards:save", store),
+  storageInfo: () => ipcRenderer.invoke("cards:storage-info"),
 });

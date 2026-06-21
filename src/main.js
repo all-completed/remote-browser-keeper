@@ -10,6 +10,7 @@ import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain } from "./cards.js";
+import { available as secureStorageAvailable } from "./securestore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -425,6 +426,7 @@ function openCardsWindow() {
   cardsWin.on("closed", () => { cardsWin = null; });
 }
 ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
+ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
 ipcMain.handle("cards:save", (_e, store) => {
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");

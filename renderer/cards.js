@@ -128,7 +128,23 @@ for (const btn of document.querySelectorAll(".reveal")) {
   });
 }
 
+async function refreshStorageNote() {
+  const el = $("storage-note");
+  if (!el) return;
+  let info = {};
+  try { info = (await window.keeperCards.storageInfo()) || {}; } catch { /* ignore */ }
+  if (info.encrypted) {
+    const backend = info.platform === "darwin" ? "your macOS Keychain"
+      : info.platform === "win32" ? "Windows DPAPI"
+      : "your system keyring";
+    el.textContent = `🔒 Encrypted at rest in ${backend}. Omit the CVV to be prompted for it instead.`;
+  } else {
+    el.textContent = "⚠ No OS secure storage available — saved in a plaintext file (chmod 600). Omit the CVV to be prompted for it instead.";
+  }
+}
+
 (async function init() {
+  refreshStorageNote();
   try {
     const loaded = await window.keeperCards.load();
     store = loaded && typeof loaded === "object" ? loaded : {};
