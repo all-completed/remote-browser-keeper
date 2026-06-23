@@ -218,6 +218,7 @@ export default function CardsApp() {
 
         <footer id="foot">
           <span id="status" className={status.kind}>{status.msg}</span>
+          <button type="button" className="ghost" onClick={() => window.close()}>Cancel</button>
           <button type="button" className="primary" onClick={save}>Save</button>
         </footer>
       </main>
