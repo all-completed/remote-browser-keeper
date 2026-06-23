@@ -32,12 +32,12 @@
         <label class="fld"><span>Cardholder</span><input id="f_holder" type="text" placeholder="JOHN Q DOE" /></label>
 
         <label class="fld"><span>Card number</span>
-          <span class="inrow"><input id="f_number" type="password" inputmode="numeric" placeholder="•••• •••• •••• ••••" /><button type="button" class="reveal" data-for="f_number">👁</button></span>
+          <input id="f_number" type="text" inputmode="numeric" maxlength="23" placeholder="#### #### #### ####" />
         </label>
 
         <div class="grid3">
-          <label class="fld"><span>Exp month</span><input id="f_month" type="text" inputmode="numeric" maxlength="2" placeholder="12" /></label>
-          <label class="fld"><span>Exp year</span><input id="f_year" type="text" inputmode="numeric" maxlength="4" placeholder="2028" /></label>
+          <label class="fld"><span>Exp month</span><select id="f_month"></select></label>
+          <label class="fld"><span>Exp year</span><select id="f_year"></select></label>
           <label class="fld"><span>CVV</span>
             <span class="inrow"><input id="f_cvv" type="password" inputmode="numeric" maxlength="4" placeholder="•••" /><button type="button" class="reveal" data-for="f_cvv">👁</button></span>
           </label>

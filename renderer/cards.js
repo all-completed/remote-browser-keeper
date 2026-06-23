@@ -11,6 +11,35 @@ const BILLING = {
 
 function cardIds() { return Object.keys(store.cards || {}); }
 
+// ---- card number grouping + expiry dropdowns ----
+function groupCardNumber(v) {
+  const digits = String(v == null ? "" : v).replace(/\D/g, "").slice(0, 19);
+  return digits.replace(/(.{4})/g, "$1 ").trim();
+}
+function digitsOnly(v) { return String(v == null ? "" : v).replace(/\D/g, ""); }
+function pad2(v) {
+  const d = digitsOnly(v);
+  return d ? d.padStart(2, "0").slice(-2) : "";
+}
+// Make sure `value` is selectable in a populated <select> (e.g. an out-of-range
+// saved year), then select it.
+function selectValue(sel, value) {
+  const v = String(value == null ? "" : value);
+  if (v && !Array.prototype.some.call(sel.options, (o) => o.value === v)) {
+    sel.appendChild(new Option(v, v));
+  }
+  sel.value = v;
+}
+function populateExpSelects() {
+  const m = $("f_month");
+  m.replaceChildren(new Option("MM", ""));
+  for (let i = 1; i <= 12; i++) { const mm = String(i).padStart(2, "0"); m.appendChild(new Option(mm, mm)); }
+  const y = $("f_year");
+  y.replaceChildren(new Option("YYYY", ""));
+  const now = new Date().getFullYear();
+  for (let yr = now; yr <= now + 12; yr++) y.appendChild(new Option(String(yr), String(yr)));
+}
+
 function renderSelect() {
   const sel = $("cardSel");
   sel.replaceChildren();
@@ -31,10 +60,10 @@ function loadCardIntoForm(id) {
   const c = (store.cards || {})[id] || {};
   $("f_id").value = id || "";
   $("f_holder").value = c.holder || "";
-  $("f_number").value = c.number || "";
+  $("f_number").value = groupCardNumber(c.number);
   $("f_cvv").value = c.cvv || "";
-  $("f_month").value = c.exp_month || "";
-  $("f_year").value = c.exp_year || "";
+  selectValue($("f_month"), pad2(c.exp_month));
+  selectValue($("f_year"), c.exp_year || "");
   const b = c.billing || {};
   for (const [el, key] of Object.entries(BILLING)) $(el).value = b[key] || "";
   $("f_domains").value = (Array.isArray(c.domains) ? c.domains : []).join("\n");
@@ -51,7 +80,7 @@ function commitForm() {
     .split(/[\n,]+/).map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "")).filter(Boolean);
   const card = {
     holder: $("f_holder").value,
-    number: $("f_number").value,
+    number: digitsOnly($("f_number").value), // store digits only; grouping is display
     cvv: $("f_cvv").value,
     exp_month: $("f_month").value,
     exp_year: $("f_year").value,
@@ -80,7 +109,13 @@ function setStatus(msg, kind) {
 }
 
 // ---- wiring ----
-for (const el of document.querySelectorAll("#form input, #form textarea")) {
+// Group the card number as it's typed (display only; stored as digits).
+$("f_number").addEventListener("input", () => {
+  const el = $("f_number");
+  const grouped = groupCardNumber(el.value);
+  if (el.value !== grouped) el.value = grouped;
+});
+for (const el of document.querySelectorAll("#form input, #form textarea, #form select")) {
   el.addEventListener("input", () => { commitForm(); renderSelect(); setStatus("Unsaved changes"); });
 }
 $("autofill").addEventListener("change", () => { store.autofill = $("autofill").checked; setStatus("Unsaved changes"); });
@@ -144,6 +179,7 @@ async function refreshStorageNote() {
 }
 
 (async function init() {
+  populateExpSelects();
   refreshStorageNote();
   try {
     const loaded = await window.keeperCards.load();

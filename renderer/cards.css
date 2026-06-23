@@ -52,14 +52,15 @@ button { font: inherit; cursor: pointer; border-radius: 8px; }
 form { display: flex; flex-direction: column; gap: 10px; }
 .fld { display: flex; flex-direction: column; gap: 4px; }
 .fld > span { color: var(--muted); font-size: 12px; }
-.fld input, .fld textarea {
+.fld input, .fld textarea, .fld select {
   padding: 9px 11px; font-size: 14px;
   background: var(--panel2); color: var(--text);
   border: 1px solid var(--border2); border-radius: 8px; outline: none;
   -webkit-user-select: text; user-select: text; width: 100%;
 }
+.fld select { height: 38px; }
 .fld textarea { resize: vertical; min-height: 40px; font-family: inherit; }
-.fld input:focus, .fld textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,0.18); }
+.fld input:focus, .fld textarea:focus, .fld select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,0.18); }
 .fld input::placeholder, .fld textarea::placeholder { color: var(--muted2); }
 .inrow { display: flex; gap: 8px; }
 .inrow input { flex: 1; }
