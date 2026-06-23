@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Field, RevealInput } from "../components/Field.jsx";
 
 // ---- small helpers (ported from cards.js) ----
 const digitsOnly = (v) => String(v == null ? "" : v).replace(/\D/g, "");
@@ -29,7 +30,6 @@ export default function CardsApp() {
   const [currentId, setCurrentId] = useState(null);
   const [status, setStatus] = useState({ msg: "", kind: "" });
   const [note, setNote] = useState("");
-  const [revealCvv, setRevealCvv] = useState(false);
   const [domainsText, setDomainsText] = useState("");
 
   // Load store + storage note once.
@@ -153,64 +153,61 @@ export default function CardsApp() {
           <p className="warn">No cards yet. Click <strong>+ New</strong> to add one.</p>
         ) : (
           <form id="form" autoComplete="off" style={{ display: "flex" }}>
-            <label className="fld"><span>Name / id</span>
+            <Field label="Name / id">
               <input type="text" placeholder="visa" value={currentId || ""} onChange={(e) => rename(e.target.value)} />
-            </label>
+            </Field>
             <label className="check"><input type="checkbox" checked={store.default === currentId} onChange={(e) => setDefault(e.target.checked)} /><span>Use this card by default</span></label>
-            <label className="fld"><span>Auto-fill on these sites — one per line (silent, no prompt)</span>
+            <Field label="Auto-fill on these sites — one per line (silent, no prompt)">
               <textarea rows={2} placeholder={"amazon.com\nshop.example.com"} value={domainsText}
                 onChange={(e) => { setDomainsText(e.target.value); patchCard({ domains: parseDomains(e.target.value) }); }} />
-            </label>
-            <label className="fld"><span>Cardholder</span>
+            </Field>
+            <Field label="Cardholder">
               <input type="text" placeholder="JOHN Q DOE" value={card.holder || ""} onChange={(e) => patchCard({ holder: e.target.value })} />
-            </label>
+            </Field>
 
-            <label className="fld"><span>Card number</span>
+            <Field label="Card number">
               <input type="text" inputMode="numeric" maxLength={23} placeholder="#### #### #### ####"
                 value={groupCardNumber(card.number)} onChange={(e) => patchCard({ number: digitsOnly(e.target.value) })} />
-            </label>
+            </Field>
 
             <div className="grid3">
-              <label className="fld"><span>Exp month</span>
+              <Field label="Exp month">
                 <select value={pad2(card.exp_month)} onChange={(e) => patchCard({ exp_month: e.target.value })}>
                   <option value="">MM</option>
                   {monthOpts().map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
-              </label>
-              <label className="fld"><span>Exp year</span>
+              </Field>
+              <Field label="Exp year">
                 <select value={card.exp_year || ""} onChange={(e) => patchCard({ exp_year: e.target.value })}>
                   <option value="">YYYY</option>
                   {yearOpts(card.exp_year).map((y) => <option key={y} value={y}>{y}</option>)}
                 </select>
-              </label>
-              <label className="fld"><span>CVV</span>
-                <span className="inrow">
-                  <input type={revealCvv ? "text" : "password"} inputMode="numeric" maxLength={4} placeholder="•••"
-                    value={card.cvv || ""} onChange={(e) => patchCard({ cvv: e.target.value })} />
-                  <button type="button" className="reveal" title="Show / hide" onClick={() => setRevealCvv((v) => !v)}>👁</button>
-                </span>
-              </label>
+              </Field>
+              <Field label="CVV">
+                <RevealInput secret inputMode="numeric" maxLength={4} placeholder="•••"
+                  value={card.cvv || ""} onChange={(e) => patchCard({ cvv: e.target.value })} />
+              </Field>
             </div>
 
             <fieldset className="billing">
               <legend>Billing address</legend>
               {BILLING.slice(0, 2).map(([key, label]) => (
-                <label className="fld" key={key}><span>{label}</span>
+                <Field label={label} key={key}>
                   <input type="text" value={billing[key] || ""} onChange={(e) => patchBilling(key, e.target.value)} />
-                </label>
+                </Field>
               ))}
               <div className="grid2">
                 {BILLING.slice(2, 4).map(([key, label]) => (
-                  <label className="fld" key={key}><span>{label}</span>
+                  <Field label={label} key={key}>
                     <input type="text" value={billing[key] || ""} onChange={(e) => patchBilling(key, e.target.value)} />
-                  </label>
+                  </Field>
                 ))}
               </div>
               <div className="grid2">
                 {BILLING.slice(4, 6).map(([key, label]) => (
-                  <label className="fld" key={key}><span>{label}</span>
+                  <Field label={label} key={key}>
                     <input type="text" placeholder={key === "country" ? "US" : undefined} value={billing[key] || ""} onChange={(e) => patchBilling(key, e.target.value)} />
-                  </label>
+                  </Field>
                 ))}
               </div>
             </fieldset>

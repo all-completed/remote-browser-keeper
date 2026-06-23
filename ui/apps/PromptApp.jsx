@@ -8,7 +8,6 @@ import ProofImage from "../components/ProofImage.jsx";
 export default function PromptApp() {
   const [req, setReq] = useState(getLatest());
   const [values, setValues] = useState({}); // selector -> display value
-  const [reveal, setReveal] = useState({}); // index -> bool
   const [pickedCardId, setPickedCardId] = useState(null);
   const [scope, setScope] = useState("");
 
@@ -16,7 +15,6 @@ export default function PromptApp() {
   // Reset per request.
   useEffect(() => {
     setValues({});
-    setReveal({});
     setPickedCardId(null);
     setScope("");
   }, [req && req.request_id]);
@@ -85,8 +83,6 @@ export default function PromptApp() {
               key={f.selector + i}
               field={f}
               value={values[f.selector] || ""}
-              revealed={!!reveal[i]}
-              onToggleReveal={() => setReveal((r) => ({ ...r, [i]: !r[i] }))}
               onChange={(raw) => setValue(f, raw)}
               onSubmit={send}
               onCancel={cancel}
