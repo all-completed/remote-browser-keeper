@@ -13,6 +13,7 @@ export default function PromptApp() {
   const [scope, setScope] = useState("");
   const [saveScope, setSaveScope] = useState(""); // "" | "session" | "forever" | "forget"
   const [savedExisting, setSavedExisting] = useState(false); // a stored value was prefilled
+  const [dontAsk, setDontAsk] = useState(false); // auto-fill silently next time
 
   useEffect(() => subscribe(setReq), []);
 
@@ -35,6 +36,7 @@ export default function PromptApp() {
     setScope("");
     setSaveScope("");
     setSavedExisting(false);
+    setDontAsk(false);
     if (!req) return;
     let cancelled = false;
     (async () => {
@@ -54,6 +56,7 @@ export default function PromptApp() {
       // to forget it (rather than misleadingly showing "Don't save").
       setSavedExisting(true);
       setSaveScope(saved[0].scope || "");
+      setDontAsk(!!saved[0].auto);
     })();
     return () => { cancelled = true; };
   }, [req && req.request_id]);
@@ -93,8 +96,13 @@ export default function PromptApp() {
     else if (pickedCardId && scope === "site") { try { window.keeper.rememberCardDomain(req.request_id, pickedCardId); } catch {} }
     const out = fields.map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
     // Save to secure storage (until restart / forever) before responding, while
-    // the pending request still exists in main.
-    if (saveScope) { try { await window.keeper.saveFields(req.request_id, out, saveScope); } catch {} }
+    // the pending request still exists in main. Card fields belong in cards.json.
+    if (saveScope) {
+      const saveOut = fields
+        .filter((f) => !String((f && f.field) || "").toLowerCase().startsWith("card-"))
+        .map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
+      try { await window.keeper.saveFields(req.request_id, saveOut, saveScope, dontAsk); } catch {}
+    }
     window.keeper.submit(req.request_id, out);
     finish();
   };
@@ -140,6 +148,14 @@ export default function PromptApp() {
                 {savedExisting && <option value="forget">Forget saved value</option>}
               </select>
             </Field>
+          )}
+          {hasNonCard && (saveScope === "session" || saveScope === "forever") && (
+            <label
+              style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted2)", fontSize: 12.5, cursor: "pointer", marginTop: -6 }}
+            >
+              <input type="checkbox" checked={dontAsk} onChange={(e) => setDontAsk(e.target.checked)} style={{ width: 14, height: 14 }} />
+              <span>Don't ask again — fill automatically next time</span>
+            </label>
           )}
         </div>
 

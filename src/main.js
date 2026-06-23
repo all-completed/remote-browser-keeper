@@ -180,6 +180,7 @@ function connect() {
     if (msg.type === "fill_request" && msg.request_id) {
       msg._requested_at = new Date().toISOString();
       if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
+      if (tryAutofillFields(msg)) return; // every field saved with "don't ask again"
       pending.set(msg.request_id, msg);
       queue.push(msg.request_id);
       showNextPrompt();
@@ -504,6 +505,26 @@ ipcMain.on("keeper:resize", (e, height) => {
   const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
   win.setContentSize(w, ch);
 });
+// Silent fill when EVERY field of the request has a saved value marked "don't ask
+// again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
+function tryAutofillFields(req) {
+  const fields = Array.isArray(req.fields) ? req.fields : [];
+  if (!fields.length) return false;
+  let baseUrl;
+  try { baseUrl = loadConfig().baseUrl; } catch { return false; }
+  const host = hostFromUrl(req.url || "");
+  const values = [];
+  for (const f of fields) {
+    const s = getSaved(baseUrl, req.session_id, host, f.selector);
+    if (!s || !s.auto || s.value == null) return false; // not all auto-fillable → prompt
+    values.push({ selector: f.selector, value: s.value });
+  }
+  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  recordHistory(req, "autofilled");
+  console.log("[keeper] field autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
+  return true;
+}
+
 // Saved field values: return any previously-saved values for this request's
 // fields (so the prompt prefills them), and save the submitted values per scope.
 ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
@@ -515,14 +536,14 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     const out = [];
     for (const f of (req.fields || [])) {
       const s = getSaved(baseUrl, req.session_id, host, f.selector);
-      if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope });
+      if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope, auto: s.auto });
     }
     return out;
   } catch {
     return [];
   }
 });
-ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope } = {}) => {
+ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = {}) => {
   try {
     if (!Array.isArray(values) || !["session", "forever", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
@@ -532,7 +553,7 @@ ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope } = {}) =>
     for (const v of values) {
       if (!v || !v.selector) continue;
       if (scope === "forget") forgetField(baseUrl, req.session_id, host, v.selector);
-      else if (v.value) saveValue(baseUrl, req.session_id, host, v.selector, v.value, scope);
+      else if (v.value) saveValue(baseUrl, req.session_id, host, v.selector, v.value, scope, auto);
     }
     return { ok: true };
   } catch (e) {

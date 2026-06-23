@@ -28,20 +28,28 @@ function writePersisted(baseUrl, obj) {
   writeJson(fieldsPath(baseUrl), obj);
 }
 
-// Returns { value, scope } or null. Scope is derived from where it's stored.
+// An entry is { value, auto }; older persisted entries may be a bare string.
+function unwrap(entry) {
+  if (entry && typeof entry === "object") return { value: entry.value, auto: !!entry.auto };
+  return { value: entry, auto: false };
+}
+
+// Returns { value, scope, auto } or null. Scope is derived from where it's stored;
+// auto means "fill automatically without prompting next time".
 export function getSaved(baseUrl, session, host, selector) {
   const k = keyOf(session, host, selector);
-  if (memory.has(k)) return { value: memory.get(k), scope: "session" };
+  if (memory.has(k)) { const e = unwrap(memory.get(k)); return { value: e.value, auto: e.auto, scope: "session" }; }
   const persisted = loadPersisted(baseUrl);
-  if (Object.prototype.hasOwnProperty.call(persisted, k)) return { value: persisted[k], scope: "forever" };
+  if (Object.prototype.hasOwnProperty.call(persisted, k)) { const e = unwrap(persisted[k]); return { value: e.value, auto: e.auto, scope: "forever" }; }
   return null;
 }
 
-export function saveValue(baseUrl, session, host, selector, value, scope) {
+export function saveValue(baseUrl, session, host, selector, value, scope, auto) {
   if (!host || !selector) return;
   const k = keyOf(session, host, selector);
+  const entry = { value, auto: !!auto };
   if (scope === "session") {
-    memory.set(k, value);
+    memory.set(k, entry);
     // ensure it isn't also persisted under the old scope
     const persisted = loadPersisted(baseUrl);
     if (k in persisted) { delete persisted[k]; writePersisted(baseUrl, persisted); }
@@ -50,7 +58,7 @@ export function saveValue(baseUrl, session, host, selector, value, scope) {
   if (scope === "forever") {
     memory.delete(k);
     const persisted = loadPersisted(baseUrl);
-    persisted[k] = value;
+    persisted[k] = entry;
     writePersisted(baseUrl, persisted);
   }
 }
