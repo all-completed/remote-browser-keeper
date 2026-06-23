@@ -7,22 +7,28 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
-    "dist": "electron-builder"
+    "build:ui": "vite build",
+    "dev:ui": "vite",
+    "start": "npm run build:ui && electron .",
+    "dist": "npm run build:ui && electron-builder"
   },
   "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
     "electron": "^33.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "vite": "^5.4.2"
   },
   "build": {
     "appId": "com.allcompleted.remotebrowserkeeper",
     "productName": "Remote Browser Keeper",
     "files": [
       "src/**/*",
-      "renderer/**/*",
+      "renderer-dist/**/*",
       "package.json"
     ],
     "directories": {

@@ -8,3 +8,6 @@ secrets.json
 cards.json
 .env
 .env.*
+
+# Vite renderer build output
+renderer-dist/

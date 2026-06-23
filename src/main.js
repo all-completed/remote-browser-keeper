@@ -14,6 +14,14 @@ import { available as secureStorageAvailable } from "./securestore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Renderer is built by Vite to ../renderer-dist (one HTML per window). With
+// KEEPER_DEV=1, load from the Vite dev server instead for hot-reload.
+const KEEPER_DEV = process.env.KEEPER_DEV === "1";
+function loadWindow(win, name) {
+  if (KEEPER_DEV) win.loadURL(`http://localhost:5173/${name}.html`);
+  else win.loadFile(path.join(__dirname, "..", "renderer-dist", `${name}.html`));
+}
+
 // ---------- Local request history (NEVER stores values) ----------
 const HISTORY_MAX = 2000;                       // keep at most this many entries
 const HISTORY_MAX_AGE_MS = 6 * 30 * 24 * 3600 * 1000; // ~6 months
@@ -281,7 +289,7 @@ function showNextPrompt() {
   promptWin.webContents.on("will-navigate", (e) => e.preventDefault());
   promptWin.webContents.on("will-redirect", (e) => e.preventDefault());
   promptWin.webContents.on("will-attach-webview", (e) => e.preventDefault());
-  promptWin.loadFile(path.join(__dirname, "..", "renderer", "prompt.html"));
+  loadWindow(promptWin, "prompt");
   promptWin.once("ready-to-show", () => {
     promptWin.webContents.send("keeper:request", {
       request_id: req.request_id,
@@ -390,7 +398,7 @@ function openHistoryWindow() {
   historyWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   historyWin.webContents.on("will-navigate", (e) => e.preventDefault());
   historyWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  historyWin.loadFile(path.join(__dirname, "..", "renderer", "history.html"));
+  loadWindow(historyWin, "history");
   historyWin.once("ready-to-show", () => {
     historyWin.webContents.send("history:data", readHistory());
     historyWin.show();
@@ -433,7 +441,7 @@ function openCardsWindow() {
   cardsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   cardsWin.webContents.on("will-navigate", (e) => e.preventDefault());
   cardsWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  cardsWin.loadFile(path.join(__dirname, "..", "renderer", "cards.html"));
+  loadWindow(cardsWin, "cards");
   cardsWin.once("ready-to-show", () => { cardsWin.show(); cardsWin.focus(); });
   cardsWin.on("closed", () => { cardsWin = null; });
 }
@@ -477,7 +485,7 @@ function openImageWindow(dataUrl) {
   imageWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   imageWin.webContents.on("will-navigate", (e) => e.preventDefault());
   imageWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  imageWin.loadFile(path.join(__dirname, "..", "renderer", "image.html"));
+  loadWindow(imageWin, "image");
   imageWin.once("ready-to-show", () => {
     imageWin.webContents.send("image:data", dataUrl);
     imageWin.show();
