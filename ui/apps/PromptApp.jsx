@@ -141,7 +141,15 @@ export default function PromptApp() {
           ))}
           {hasNonCard && (
             <Field label={savedExisting ? "Saved value" : "Save these values"}>
-              <select value={saveScope} onChange={(e) => setSaveScope(e.target.value)}>
+              <select
+                value={saveScope}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSaveScope(v);
+                  // Default "don't ask again" on when a save scope is chosen.
+                  setDontAsk(v === "session" || v === "forever");
+                }}
+              >
                 {!savedExisting && <option value="">Don't save</option>}
                 <option value="session">Until the Keeper restarts</option>
                 <option value="forever">Save securely (until I remove it)</option>
