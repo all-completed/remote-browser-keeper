@@ -23,17 +23,19 @@ function shortUrl(u) {
 
 function isSecret(field) {
   const f = String(field || "").toLowerCase();
-  // Masked: password, code, card-number, card-cvv. Plain: text/login/email and
-  // card-holder-name / card-exp / card-billing-address.
+  // Masked: password, code, card-cvv. Plain (visible): text/login/email and the
+  // card fields — the card number is shown grouped, like a real checkout form, so
+  // the user can read it back; only the CVV is masked.
   return !(
     f === "text" || f === "login" || f === "email" ||
-    f === "card-holder-name" || f === "card-exp" || f === "card-billing-address"
+    f === "card-number" || f === "card-holder-name" || f === "card-exp" ||
+    f === "card-billing-address"
   );
 }
 
 // ---- Card formatting templates ----
 // A template has slot chars (letters or '#') with literal separators (space, '/').
-const CARD_NUMBER_DEFAULT = "################"; // 16 digits, no grouping
+const CARD_NUMBER_DEFAULT = "#### #### #### ####"; // 16 digits, grouped in 4s
 const CARD_EXP_DEFAULT = "MM/YY";
 
 function templateSlots(t) {
@@ -57,6 +59,43 @@ function cardNumberMask(format) {
 }
 function cardExpTemplate(format) {
   return format && /[MY]/i.test(format) ? format : CARD_EXP_DEFAULT;
+}
+
+// A card-exp field whose format is year-only (e.g. "YYYY"/"YY") or month-only
+// ("MM") is rendered as a dropdown instead of a typed input. Combined "MM/YY"
+// (or no format) stays a typed field. Returns "year" | "month" | null.
+function expFieldMode(field, format) {
+  if (String(field || "").toLowerCase() !== "card-exp") return null;
+  const f = String(format || "");
+  const hasY = /Y/i.test(f), hasM = /M/i.test(f);
+  if (hasY && !hasM) return "year";
+  if (hasM && !hasY) return "month";
+  return null;
+}
+function yearIsFourDigit(format) {
+  return (String(format || "").match(/Y/gi) || []).length >= 4;
+}
+function buildMonthSelect() {
+  const s = document.createElement("select");
+  s.className = "cardSelect";
+  s.appendChild(new Option("Month (MM)", ""));
+  for (let m = 1; m <= 12; m++) {
+    const mm = String(m).padStart(2, "0");
+    s.appendChild(new Option(mm, mm));
+  }
+  return s;
+}
+function buildYearSelect(format) {
+  const s = document.createElement("select");
+  s.className = "cardSelect";
+  s.appendChild(new Option("Year", ""));
+  const four = yearIsFourDigit(format);
+  const now = new Date().getFullYear();
+  for (let y = now; y <= now + 10; y++) {
+    const v = four ? String(y) : String(y).slice(-2);
+    s.appendChild(new Option(v, v));
+  }
+  return s;
 }
 
 const BILLING_TOKENS = {
@@ -138,6 +177,27 @@ function makeRow(field) {
 
   const kind = String(field.field || "").toLowerCase();
   const fmt = field.format;
+
+  // Expiry month / year → dropdown selection (no typing).
+  const expMode = expFieldMode(kind, fmt);
+  if (expMode) {
+    const sel = expMode === "month" ? buildMonthSelect() : buildYearSelect(fmt);
+    row.appendChild(sel);
+    wrap.appendChild(row);
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = expMode === "month"
+      ? "expiry month"
+      : (yearIsFourDigit(fmt) ? "expiry year" : "expiry year (2-digit)");
+    wrap.appendChild(hint);
+    sel.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); send(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+    inputs.push({ selector: field.selector, el: sel, field: kind });
+    return wrap;
+  }
+
   const multiline = isMultiline(kind, fmt);
   const secret = isSecret(kind);
 
