@@ -142,7 +142,7 @@ export default function CardsApp() {
         </label>
 
         <div className="cardbar">
-          <select aria-label="Select card" value={currentId || ""} onChange={(e) => setCurrentId(e.target.value)}>
+          <select id="cardSel" aria-label="Select card" value={currentId || ""} onChange={(e) => setCurrentId(e.target.value)}>
             {ids.map((id) => <option key={id} value={id}>{id + (store.default === id ? "  (default)" : "")}</option>)}
           </select>
           <button type="button" className="ghost" onClick={newCard}>+ New</button>
