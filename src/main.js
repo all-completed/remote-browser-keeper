@@ -11,7 +11,7 @@ import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
-import { getSavedValue, saveValue } from "./fieldstore.js";
+import { getSaved, saveValue, forget as forgetField } from "./fieldstore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -514,8 +514,8 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     const host = hostFromUrl(req.url || "");
     const out = [];
     for (const f of (req.fields || [])) {
-      const v = getSavedValue(baseUrl, host, f.selector);
-      if (v != null) out.push({ selector: f.selector, value: v });
+      const s = getSaved(baseUrl, host, f.selector);
+      if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope });
     }
     return out;
   } catch {
@@ -524,13 +524,15 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
 });
 ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope } = {}) => {
   try {
-    if (!Array.isArray(values) || (scope !== "session" && scope !== "forever")) return { ok: false };
+    if (!Array.isArray(values) || !["session", "forever", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
     if (!req) return { ok: false };
     const { baseUrl } = loadConfig();
     const host = hostFromUrl(req.url || "");
     for (const v of values) {
-      if (v && v.selector && v.value) saveValue(baseUrl, host, v.selector, v.value, scope);
+      if (!v || !v.selector) continue;
+      if (scope === "forget") forgetField(baseUrl, host, v.selector);
+      else if (v.value) saveValue(baseUrl, host, v.selector, v.value, scope);
     }
     return { ok: true };
   } catch (e) {

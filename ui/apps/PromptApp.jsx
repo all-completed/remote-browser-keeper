@@ -11,7 +11,8 @@ export default function PromptApp() {
   const [values, setValues] = useState({}); // selector -> display value
   const [pickedCardId, setPickedCardId] = useState(null);
   const [scope, setScope] = useState("");
-  const [saveScope, setSaveScope] = useState(""); // "" | "session" | "forever"
+  const [saveScope, setSaveScope] = useState(""); // "" | "session" | "forever" | "forget"
+  const [savedExisting, setSavedExisting] = useState(false); // a stored value was prefilled
 
   useEffect(() => subscribe(setReq), []);
 
@@ -33,6 +34,7 @@ export default function PromptApp() {
     setPickedCardId(null);
     setScope("");
     setSaveScope("");
+    setSavedExisting(false);
     if (!req) return;
     let cancelled = false;
     (async () => {
@@ -48,6 +50,10 @@ export default function PromptApp() {
         }
         return next;
       });
+      // Reflect the saved state: default the control to the stored scope and offer
+      // to forget it (rather than misleadingly showing "Don't save").
+      setSavedExisting(true);
+      setSaveScope(saved[0].scope || "");
     })();
     return () => { cancelled = true; };
   }, [req && req.request_id]);
@@ -126,11 +132,12 @@ export default function PromptApp() {
             />
           ))}
           {hasNonCard && (
-            <Field label="Save these values">
+            <Field label={savedExisting ? "Saved value" : "Save these values"}>
               <select value={saveScope} onChange={(e) => setSaveScope(e.target.value)}>
-                <option value="">Don't save</option>
+                {!savedExisting && <option value="">Don't save</option>}
                 <option value="session">Until the Keeper restarts</option>
                 <option value="forever">Save securely (until I remove it)</option>
+                {savedExisting && <option value="forget">Forget saved value</option>}
               </select>
             </Field>
           )}

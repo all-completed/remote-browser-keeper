@@ -1,5 +1,6 @@
 // Saved field values (passwords and other entered values) the user chose to keep,
-// so future fill_requests for the same field prefill automatically. Two scopes:
+// so future fill_requests for the same field prefill automatically. Two scopes,
+// implied by where the value lives:
 //   - "session" : in-memory only, cleared when the Keeper restarts.
 //   - "forever" : persisted to ~/.remote-browser-keeper/<base-url>/fields.json,
 //                 OS-encrypted via securestore (safeStorage/Keychain) when available.
@@ -22,12 +23,18 @@ function loadPersisted(baseUrl) {
   const obj = readJson(fieldsPath(baseUrl));
   return obj && typeof obj === "object" ? obj : {};
 }
+function writePersisted(baseUrl, obj) {
+  try { fs.mkdirSync(path.dirname(fieldsPath(baseUrl)), { recursive: true }); } catch { /* ignore */ }
+  writeJson(fieldsPath(baseUrl), obj);
+}
 
-export function getSavedValue(baseUrl, host, selector) {
+// Returns { value, scope } or null. Scope is derived from where it's stored.
+export function getSaved(baseUrl, host, selector) {
   const k = keyOf(host, selector);
-  if (memory.has(k)) return memory.get(k);
+  if (memory.has(k)) return { value: memory.get(k), scope: "session" };
   const persisted = loadPersisted(baseUrl);
-  return Object.prototype.hasOwnProperty.call(persisted, k) ? persisted[k] : null;
+  if (Object.prototype.hasOwnProperty.call(persisted, k)) return { value: persisted[k], scope: "forever" };
+  return null;
 }
 
 export function saveValue(baseUrl, host, selector, value, scope) {
@@ -35,12 +42,23 @@ export function saveValue(baseUrl, host, selector, value, scope) {
   const k = keyOf(host, selector);
   if (scope === "session") {
     memory.set(k, value);
+    // ensure it isn't also persisted under the old scope
+    const persisted = loadPersisted(baseUrl);
+    if (k in persisted) { delete persisted[k]; writePersisted(baseUrl, persisted); }
     return;
   }
   if (scope === "forever") {
+    memory.delete(k);
     const persisted = loadPersisted(baseUrl);
     persisted[k] = value;
-    try { fs.mkdirSync(path.dirname(fieldsPath(baseUrl)), { recursive: true }); } catch { /* ignore */ }
-    writeJson(fieldsPath(baseUrl), persisted);
+    writePersisted(baseUrl, persisted);
   }
+}
+
+export function forget(baseUrl, host, selector) {
+  if (!host || !selector) return;
+  const k = keyOf(host, selector);
+  memory.delete(k);
+  const persisted = loadPersisted(baseUrl);
+  if (k in persisted) { delete persisted[k]; writePersisted(baseUrl, persisted); }
 }
