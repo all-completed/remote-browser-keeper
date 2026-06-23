@@ -514,7 +514,7 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     const host = hostFromUrl(req.url || "");
     const out = [];
     for (const f of (req.fields || [])) {
-      const s = getSaved(baseUrl, host, f.selector);
+      const s = getSaved(baseUrl, req.session_id, host, f.selector);
       if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope });
     }
     return out;
@@ -531,8 +531,8 @@ ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope } = {}) =>
     const host = hostFromUrl(req.url || "");
     for (const v of values) {
       if (!v || !v.selector) continue;
-      if (scope === "forget") forgetField(baseUrl, host, v.selector);
-      else if (v.value) saveValue(baseUrl, host, v.selector, v.value, scope);
+      if (scope === "forget") forgetField(baseUrl, req.session_id, host, v.selector);
+      else if (v.value) saveValue(baseUrl, req.session_id, host, v.selector, v.value, scope);
     }
     return { ok: true };
   } catch (e) {

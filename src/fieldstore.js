@@ -4,13 +4,13 @@
 //   - "session" : in-memory only, cleared when the Keeper restarts.
 //   - "forever" : persisted to ~/.remote-browser-keeper/<base-url>/fields.json,
 //                 OS-encrypted via securestore (safeStorage/Keychain) when available.
-// Keyed by host + selector. Values stay on this machine and are never sent to the AI.
+// Keyed by session + host + selector. Values stay on this machine, never sent to the AI.
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import { readJson, writeJson } from "./securestore.js";
 
-const memory = new Map(); // "host|selector" -> value (cleared on restart)
+const memory = new Map(); // "session|host|selector" -> value (cleared on restart)
 
 function sanitizeForPath(s) {
   return String(s || "").replace(/^https?:\/\//, "").replace(/\/+$/, "").replace(/[^A-Za-z0-9._-]/g, "_") || "default";
@@ -18,7 +18,7 @@ function sanitizeForPath(s) {
 function fieldsPath(baseUrl) {
   return path.join(app.getPath("home"), ".remote-browser-keeper", sanitizeForPath(baseUrl), "fields.json");
 }
-function keyOf(host, selector) { return `${host}|${selector}`; }
+function keyOf(session, host, selector) { return `${session || ""}|${host}|${selector}`; }
 function loadPersisted(baseUrl) {
   const obj = readJson(fieldsPath(baseUrl));
   return obj && typeof obj === "object" ? obj : {};
@@ -29,17 +29,17 @@ function writePersisted(baseUrl, obj) {
 }
 
 // Returns { value, scope } or null. Scope is derived from where it's stored.
-export function getSaved(baseUrl, host, selector) {
-  const k = keyOf(host, selector);
+export function getSaved(baseUrl, session, host, selector) {
+  const k = keyOf(session, host, selector);
   if (memory.has(k)) return { value: memory.get(k), scope: "session" };
   const persisted = loadPersisted(baseUrl);
   if (Object.prototype.hasOwnProperty.call(persisted, k)) return { value: persisted[k], scope: "forever" };
   return null;
 }
 
-export function saveValue(baseUrl, host, selector, value, scope) {
+export function saveValue(baseUrl, session, host, selector, value, scope) {
   if (!host || !selector) return;
-  const k = keyOf(host, selector);
+  const k = keyOf(session, host, selector);
   if (scope === "session") {
     memory.set(k, value);
     // ensure it isn't also persisted under the old scope
@@ -55,9 +55,9 @@ export function saveValue(baseUrl, host, selector, value, scope) {
   }
 }
 
-export function forget(baseUrl, host, selector) {
+export function forget(baseUrl, session, host, selector) {
   if (!host || !selector) return;
-  const k = keyOf(host, selector);
+  const k = keyOf(session, host, selector);
   memory.delete(k);
   const persisted = loadPersisted(baseUrl);
   if (k in persisted) { delete persisted[k]; writePersisted(baseUrl, persisted); }
