@@ -11,4 +11,8 @@ contextBridge.exposeInMainWorld("keeper", {
   rememberCardDomain: (request_id, card_id) => ipcRenderer.invoke("keeper:remember-card-domain", { request_id, card_id }),
   rememberCardAllSites: (request_id, card_id) => ipcRenderer.invoke("keeper:remember-card-all-sites", { request_id, card_id }),
   viewImage: (dataUrl) => ipcRenderer.send("keeper:view-image", dataUrl),
+  resize: (height) => ipcRenderer.send("keeper:resize", Math.round(height)),
+  // Saved field values (passwords etc.) kept on this machine, never sent to the AI.
+  savedValues: (request_id) => ipcRenderer.invoke("keeper:saved-values", { request_id }),
+  saveFields: (request_id, values, scope) => ipcRenderer.invoke("keeper:save-fields", { request_id, values, scope }),
 });

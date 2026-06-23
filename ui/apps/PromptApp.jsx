@@ -4,25 +4,59 @@ import { getLatest, subscribe } from "../lib/promptBridge.js";
 import FieldRow from "../components/FieldRow.jsx";
 import CardPicker from "../components/CardPicker.jsx";
 import ProofImage from "../components/ProofImage.jsx";
+import { Field } from "../components/Field.jsx";
 
 export default function PromptApp() {
   const [req, setReq] = useState(getLatest());
   const [values, setValues] = useState({}); // selector -> display value
   const [pickedCardId, setPickedCardId] = useState(null);
   const [scope, setScope] = useState("");
+  const [saveScope, setSaveScope] = useState(""); // "" | "session" | "forever"
 
   useEffect(() => subscribe(setReq), []);
-  // Reset per request.
+
+  // Report content height to main so the window fits exactly (no empty space /
+  // clipping). Re-reports as content changes (proof image loads, picker expands).
+  useEffect(() => {
+    const report = () => {
+      try { window.keeper.resize(document.documentElement.scrollHeight); } catch { /* ignore */ }
+    };
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(document.body);
+    return () => ro.disconnect();
+  }, []);
+
+  // Reset per request, then prefill any values the user previously saved.
   useEffect(() => {
     setValues({});
     setPickedCardId(null);
     setScope("");
+    setSaveScope("");
+    if (!req) return;
+    let cancelled = false;
+    (async () => {
+      let saved = [];
+      try { saved = await window.keeper.savedValues(req.request_id); } catch { /* ignore */ }
+      if (cancelled || !Array.isArray(saved) || !saved.length) return;
+      const reqFields = Array.isArray(req.fields) ? req.fields : [];
+      setValues((m) => {
+        const next = { ...m };
+        for (const v of saved) {
+          const f = reqFields.find((x) => x.selector === v.selector);
+          if (f) next[v.selector] = transformValue(f, v.value);
+        }
+        return next;
+      });
+    })();
+    return () => { cancelled = true; };
   }, [req && req.request_id]);
 
   if (!req) return <div id="glow" />;
 
   const fields = Array.isArray(req.fields) ? req.fields : [];
   const hasCard = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
+  const hasNonCard = fields.some((f) => !String((f && f.field) || "").toLowerCase().startsWith("card-"));
   const showPicker = hasCard && Array.isArray(req.cards) && req.cards.length > 0;
 
   const setValue = (field, raw) => {
@@ -48,10 +82,13 @@ export default function PromptApp() {
 
   const finish = () => setReq(null); // hide; main treats window-close as cancel only if no response sent
 
-  const send = () => {
+  const send = async () => {
     if (pickedCardId && scope === "all") { try { window.keeper.rememberCardAllSites(req.request_id, pickedCardId); } catch {} }
     else if (pickedCardId && scope === "site") { try { window.keeper.rememberCardDomain(req.request_id, pickedCardId); } catch {} }
     const out = fields.map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
+    // Save to secure storage (until restart / forever) before responding, while
+    // the pending request still exists in main.
+    if (saveScope) { try { await window.keeper.saveFields(req.request_id, out, saveScope); } catch {} }
     window.keeper.submit(req.request_id, out);
     finish();
   };
@@ -88,6 +125,15 @@ export default function PromptApp() {
               onCancel={cancel}
             />
           ))}
+          {hasNonCard && (
+            <Field label="Save these values">
+              <select value={saveScope} onChange={(e) => setSaveScope(e.target.value)}>
+                <option value="">Don't save</option>
+                <option value="session">Until the Keeper restarts</option>
+                <option value="forever">Save securely (until I remove it)</option>
+              </select>
+            </Field>
+          )}
         </div>
 
         <p id="note">Sent to the service and typed into the form for you. Never shown to the AI model.</p>

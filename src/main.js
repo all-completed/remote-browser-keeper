@@ -11,6 +11,7 @@ import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
+import { getSavedValue, saveValue } from "./fieldstore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -493,6 +494,49 @@ function openImageWindow(dataUrl) {
   });
   imageWin.on("closed", () => { imageWin = null; });
 }
+// The prompt renderer reports its content height; fit the window to it (keep the
+// width, cap to the screen) so there's no empty space or clipped content.
+ipcMain.on("keeper:resize", (e, height) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win !== promptWin || !Number.isFinite(height) || height < 1) return;
+  const area = screen.getPrimaryDisplay().workAreaSize;
+  const [w] = win.getContentSize();
+  const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
+  win.setContentSize(w, ch);
+});
+// Saved field values: return any previously-saved values for this request's
+// fields (so the prompt prefills them), and save the submitted values per scope.
+ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
+  try {
+    const req = pending.get(request_id);
+    if (!req) return [];
+    const { baseUrl } = loadConfig();
+    const host = hostFromUrl(req.url || "");
+    const out = [];
+    for (const f of (req.fields || [])) {
+      const v = getSavedValue(baseUrl, host, f.selector);
+      if (v != null) out.push({ selector: f.selector, value: v });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+});
+ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope } = {}) => {
+  try {
+    if (!Array.isArray(values) || (scope !== "session" && scope !== "forever")) return { ok: false };
+    const req = pending.get(request_id);
+    if (!req) return { ok: false };
+    const { baseUrl } = loadConfig();
+    const host = hostFromUrl(req.url || "");
+    for (const v of values) {
+      if (v && v.selector && v.value) saveValue(baseUrl, host, v.selector, v.value, scope);
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 ipcMain.on("keeper:view-image", (_e, dataUrl) => openImageWindow(dataUrl));
 // The viewer reports the image's natural size; fit the window to it (capped to
 // the screen work area) so the user sees it at normal size.
