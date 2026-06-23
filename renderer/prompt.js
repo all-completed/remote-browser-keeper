@@ -311,18 +311,22 @@ function makeCardPicker(req) {
   }
   wrap.appendChild(sel);
 
-  // "Auto-fill on this site next time" — records the request's domain for the
-  // chosen card so future requests from it fill silently. Shown once a card is picked.
-  const remember = document.createElement("label");
+  // Permission scope — once a card is picked, ask whether to auto-fill it without
+  // prompting next time: just this site, or all sites. Default: don't remember.
+  const remember = document.createElement("div");
   remember.className = "rememberRow";
   remember.hidden = true;
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  const txt = document.createElement("span");
-  txt.textContent = req.host ? `Auto-fill on ${req.host} next time` : "Auto-fill on this site next time";
-  remember.appendChild(cb);
-  remember.appendChild(txt);
-  rememberEl = cb;
+  const permLbl = document.createElement("span");
+  permLbl.textContent = "Auto-fill next time:";
+  const permSel = document.createElement("select");
+  permSel.className = "cardSelect";
+  permSel.style.flex = "1";
+  permSel.appendChild(new Option("Ask me each time", ""));
+  permSel.appendChild(new Option(req.host ? `Allow on ${req.host}` : "Allow on this site", "site"));
+  permSel.appendChild(new Option("Allow for all sites", "all"));
+  remember.appendChild(permLbl);
+  remember.appendChild(permSel);
+  rememberEl = permSel;
   wrap.appendChild(remember);
 
   sel.addEventListener("change", async () => {
@@ -344,9 +348,13 @@ function makeCardPicker(req) {
 
 function send() {
   if (!currentId) return;
-  // Approve this site for the chosen card if "remember" is ticked (fire-and-forget).
-  if (pickedCardId && rememberEl && rememberEl.checked) {
-    try { window.keeper.rememberCardDomain(currentId, pickedCardId); } catch {}
+  // Approve the chosen card per the selected scope (fire-and-forget).
+  if (pickedCardId && rememberEl) {
+    const scope = rememberEl.value;
+    try {
+      if (scope === "all") window.keeper.rememberCardAllSites(currentId, pickedCardId);
+      else if (scope === "site") window.keeper.rememberCardDomain(currentId, pickedCardId);
+    } catch {}
   }
   const values = inputs.map((i) => ({ selector: i.selector, value: submitVal(i.field, i.el.value) }));
   window.keeper.submit(currentId, values);

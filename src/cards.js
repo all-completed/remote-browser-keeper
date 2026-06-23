@@ -81,6 +81,7 @@ export function hostFromUrl(url) {
   catch { return ""; }
 }
 function domainMatches(approved, host) {
+  if (approved === "*") return true; // "*" = approved for all sites
   const a = String(approved || "").toLowerCase().replace(/^www\./, "");
   return !!a && !!host && (host === a || host.endsWith("." + a));
 }
@@ -104,6 +105,15 @@ export function approveDomain(store, cardId, host) {
   if (!Array.isArray(card.domains)) card.domains = [];
   if (card.domains.includes(host)) return false;
   card.domains.push(host);
+  return true;
+}
+// Approve a card for ALL sites (wildcard). Returns true if changed.
+export function approveAllSites(store, cardId) {
+  const card = ((store && store.cards) || {})[cardId];
+  if (!card) return false;
+  if (!Array.isArray(card.domains)) card.domains = [];
+  if (card.domains.includes("*")) return false;
+  card.domains.push("*");
   return true;
 }
 

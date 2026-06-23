@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -351,6 +351,18 @@ ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {})
     const store = loadCards(base);
     if (approveDomain(store, card_id, host)) saveCards(base, store);
     return { ok: true, host };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// "Allow for all sites": approve the chosen card for every site (wildcard).
+ipcMain.handle("keeper:remember-card-all-sites", (_e, { card_id } = {}) => {
+  try {
+    const base = cardBaseUrl();
+    const store = loadCards(base);
+    if (approveAllSites(store, card_id)) saveCards(base, store);
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }
