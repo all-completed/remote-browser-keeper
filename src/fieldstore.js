@@ -70,3 +70,30 @@ export function forget(baseUrl, session, host, selector) {
   const persisted = loadPersisted(baseUrl);
   if (k in persisted) { delete persisted[k]; writePersisted(baseUrl, persisted); }
 }
+
+function parseKey(k) {
+  const i1 = k.indexOf("|");
+  const i2 = k.indexOf("|", i1 + 1);
+  if (i1 < 0 || i2 < 0) return null;
+  return { session: k.slice(0, i1), host: k.slice(i1 + 1, i2), selector: k.slice(i2 + 1) };
+}
+
+// List saved entries (metadata only — NEVER the value) for the management window.
+export function listSaved(baseUrl) {
+  const out = [];
+  for (const [k, e] of memory.entries()) {
+    const p = parseKey(k);
+    if (p) out.push({ ...p, scope: "session", auto: !!unwrap(e).auto });
+  }
+  const persisted = loadPersisted(baseUrl);
+  for (const k of Object.keys(persisted)) {
+    const p = parseKey(k);
+    if (p) out.push({ ...p, scope: "forever", auto: !!unwrap(persisted[k]).auto });
+  }
+  return out;
+}
+
+export function forgetAll(baseUrl) {
+  memory.clear();
+  writePersisted(baseUrl, {});
+}

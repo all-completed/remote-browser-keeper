@@ -20,6 +20,7 @@ export default defineConfig({
         history: resolve(__dirname, 'ui/history.html'),
         cards: resolve(__dirname, 'ui/cards.html'),
         image: resolve(__dirname, 'ui/image.html'),
+        savedfields: resolve(__dirname, 'ui/savedfields.html'),
       },
     },
   },

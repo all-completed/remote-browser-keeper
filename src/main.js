@@ -11,7 +11,7 @@ import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
-import { getSaved, saveValue, forget as forgetField } from "./fieldstore.js";
+import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields } from "./fieldstore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -447,6 +447,44 @@ function openCardsWindow() {
   cardsWin.once("ready-to-show", () => { cardsWin.show(); cardsWin.focus(); });
   cardsWin.on("closed", () => { cardsWin = null; });
 }
+
+let savedFieldsWin = null;
+function openSavedFieldsWindow() {
+  if (savedFieldsWin) { savedFieldsWin.show(); savedFieldsWin.focus(); return; }
+  savedFieldsWin = new BrowserWindow({
+    width: 560,
+    height: 640,
+    resizable: true,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Saved fields",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "savedfields-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  savedFieldsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  savedFieldsWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  savedFieldsWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(savedFieldsWin, "savedfields");
+  savedFieldsWin.once("ready-to-show", () => { savedFieldsWin.show(); savedFieldsWin.focus(); });
+  savedFieldsWin.on("closed", () => { savedFieldsWin = null; });
+}
+ipcMain.handle("fields:list", () => {
+  try { return listSaved(loadConfig().baseUrl); } catch { return []; }
+});
+ipcMain.handle("fields:forget", (_e, { session, host, selector } = {}) => {
+  try { forgetField(loadConfig().baseUrl, session, host, selector); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle("fields:forget-all", () => {
+  try { forgetAllFields(loadConfig().baseUrl); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
 ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
 ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
 ipcMain.handle("cards:save", (_e, store) => {
@@ -590,6 +628,7 @@ function updateTray() {
     { label: connected ? "🟢 Connected" : "🟡 Reconnecting…", enabled: false },
     { type: "separator" },
     { label: "Cards…", click: openCardsWindow },
+    { label: "Saved fields…", click: openSavedFieldsWindow },
     { label: "History…", click: openHistoryWindow },
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
