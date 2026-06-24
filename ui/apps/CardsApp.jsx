@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Field, RevealInput } from "../components/Field.jsx";
+import { Field } from "../components/Field.jsx";
 
 // ---- small helpers (ported from cards.js) ----
 const digitsOnly = (v) => String(v == null ? "" : v).replace(/\D/g, "");
@@ -32,6 +32,7 @@ function invalidDomains(text) {
   return normalizeDomains(text).filter((d) => !isValidDomain(d));
 }
 function uniqueId(cards) { let n = 1, id = "card"; while (cards[id]) { n += 1; id = "card" + n; } return id; }
+const last4 = (num) => String(num || "").replace(/\D/g, "").slice(-4);
 
 const BILLING = [
   ["address_line1", "Address line 1"], ["address_line2", "Address line 2"],
@@ -44,6 +45,12 @@ export default function CardsApp() {
   const [status, setStatus] = useState({ msg: "", kind: "" });
   const [note, setNote] = useState("");
   const [domainsText, setDomainsText] = useState("");
+  // A saved card's full number / CVV are never shown again — only the last 4 of the
+  // number (as a hint) and a hidden CVV. These flags flip when the user types a
+  // replacement; they reset on card switch and after save so the values re-hide.
+  const [editNum, setEditNum] = useState(false);
+  const [editCvv, setEditCvv] = useState(false);
+  useEffect(() => { setEditNum(false); setEditCvv(false); }, [currentId]);
 
   // Load store + storage note once.
   useEffect(() => {
@@ -137,7 +144,7 @@ export default function CardsApp() {
     }
     try {
       const r = await window.keeperCards.save(store);
-      if (r && r.ok) setStatus({ msg: "Saved ✓", kind: "ok" });
+      if (r && r.ok) { setStatus({ msg: "Saved ✓", kind: "ok" }); setEditNum(false); setEditCvv(false); } // re-hide number/CVV
       else setStatus({ msg: "Error: " + ((r && r.error) || "save failed"), kind: "err" });
     } catch (e) {
       setStatus({ msg: "Error: " + e.message, kind: "err" });
@@ -189,9 +196,11 @@ export default function CardsApp() {
               <input type="text" placeholder="JOHN Q DOE" value={card.holder || ""} onChange={(e) => patchCard({ holder: e.target.value })} />
             </Field>
 
-            <Field label="Card number">
+            <Field label="Card number"
+              hint={!editNum && last4(card.number) ? `Saved card ending ${last4(card.number)} — type to replace` : undefined}>
               <input type="text" inputMode="numeric" maxLength={23} placeholder="#### #### #### ####"
-                value={groupCardNumber(card.number)} onChange={(e) => patchCard({ number: digitsOnly(e.target.value) })} />
+                value={editNum ? groupCardNumber(card.number) : ""}
+                onChange={(e) => { setEditNum(true); patchCard({ number: digitsOnly(e.target.value) }); }} />
             </Field>
 
             <div className="grid3">
@@ -207,9 +216,10 @@ export default function CardsApp() {
                   {yearOpts(card.exp_year).map((y) => <option key={y} value={y}>{y}</option>)}
                 </select>
               </Field>
-              <Field label="CVV">
-                <RevealInput secret inputMode="numeric" maxLength={4} placeholder="•••"
-                  value={card.cvv || ""} onChange={(e) => patchCard({ cvv: e.target.value })} />
+              <Field label="CVV" hint={!editCvv && card.cvv ? "Saved — hidden; type to replace" : undefined}>
+                <input type="password" inputMode="numeric" maxLength={4} autoComplete="off" placeholder="•••"
+                  value={editCvv ? (card.cvv || "") : ""}
+                  onChange={(e) => { setEditCvv(true); patchCard({ cvv: e.target.value }); }} />
               </Field>
             </div>
 
