@@ -153,6 +153,22 @@ export function describeField(field) {
 }
 
 // Apply card grouping / numeric / max-length as the user types (selects pass through).
+// Generate a strong value in the Keeper (never produced by the agent). Honors a
+// numeric format and an optional length; defaults to 20 chars of an unambiguous set.
+export function generatePassword(field) {
+  const f = field || {};
+  const numeric = ["numeric", "digits", "number"].includes(String(f.format || "").toLowerCase());
+  const charset = numeric
+    ? "0123456789"
+    : "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*-_=+";
+  const len = Number.isInteger(f.length) && f.length > 0 ? Math.min(f.length, 64) : 20;
+  const arr = new Uint32Array(len);
+  (globalThis.crypto || window.crypto).getRandomValues(arr);
+  let out = "";
+  for (let i = 0; i < len; i++) out += charset[arr[i] % charset.length];
+  return out;
+}
+
 export function transformValue(field, raw) {
   const kind = String(field.field || "").toLowerCase();
   if (expFieldMode(kind, field.format)) return raw; // dropdown value as-is

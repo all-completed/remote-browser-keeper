@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { shortUrl, submitVal, transformValue } from "../lib/format.js";
+import { shortUrl, submitVal, transformValue, generatePassword } from "../lib/format.js";
 import { getLatest, subscribe } from "../lib/promptBridge.js";
 import FieldRow from "../components/FieldRow.jsx";
 import CardPicker from "../components/CardPicker.jsx";
@@ -38,17 +38,28 @@ export default function PromptApp() {
     setSavedExisting(false);
     setDontAsk(false);
     if (!req) return;
+    const reqFields = Array.isArray(req.fields) ? req.fields : [];
+    // Generate a fresh strong value for any generate-field, and default to saving it.
+    const genInit = {};
+    let hasGen = false;
+    for (const f of reqFields) {
+      if (f && f.generate) { genInit[f.selector] = generatePassword(f); hasGen = true; }
+    }
+    if (hasGen) {
+      setValues((m) => ({ ...m, ...genInit }));
+      setSaveScope("forever");
+      setDontAsk(true);
+    }
     let cancelled = false;
     (async () => {
       let saved = [];
       try { saved = await window.keeper.savedValues(req.request_id); } catch { /* ignore */ }
       if (cancelled || !Array.isArray(saved) || !saved.length) return;
-      const reqFields = Array.isArray(req.fields) ? req.fields : [];
       setValues((m) => {
         const next = { ...m };
         for (const v of saved) {
           const f = reqFields.find((x) => x.selector === v.selector);
-          if (f) next[v.selector] = transformValue(f, v.value);
+          if (f && !f.generate) next[v.selector] = transformValue(f, v.value); // keep generated values
         }
         return next;
       });
@@ -135,6 +146,7 @@ export default function PromptApp() {
               field={f}
               value={values[f.selector] || ""}
               onChange={(raw) => setValue(f, raw)}
+              onGenerate={(field) => setValues((m) => ({ ...m, [field.selector]: generatePassword(field) }))}
               onSubmit={send}
               onCancel={cancel}
             />
