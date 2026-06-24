@@ -12,11 +12,24 @@ function yearOpts(selected) {
   if (selected && !ys.includes(String(selected))) ys.unshift(String(selected));
   return ys;
 }
-function parseDomains(text) {
+// A plain hostname: dot-separated labels (a-z0-9, inner hyphens), TLD of 2+ letters.
+// Rejects globs (*.pge.com), spaces, schemes, and other junk.
+function isValidDomain(d) {
+  return /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(d);
+}
+function normalizeDomains(text) {
   return String(text || "")
     .split(/[\n,]+/)
     .map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, ""))
     .filter(Boolean);
+}
+// Only valid hostnames are stored on the card.
+function parseDomains(text) {
+  return normalizeDomains(text).filter(isValidDomain);
+}
+// The entries that would be dropped — surfaced to the user so a save can be blocked.
+function invalidDomains(text) {
+  return normalizeDomains(text).filter((d) => !isValidDomain(d));
 }
 function uniqueId(cards) { let n = 1, id = "card"; while (cards[id]) { n += 1; id = "card" + n; } return id; }
 
@@ -117,6 +130,11 @@ export default function CardsApp() {
   };
 
   const save = async () => {
+    const bad = invalidDomains(domainsText);
+    if (bad.length) {
+      setStatus({ msg: `Fix invalid auto-fill domain(s): ${bad.join(", ")}`, kind: "err" });
+      return; // don't save until the domains are valid hostnames
+    }
     try {
       const r = await window.keeperCards.save(store);
       if (r && r.ok) setStatus({ msg: "Saved ✓", kind: "ok" });
@@ -157,9 +175,15 @@ export default function CardsApp() {
               <input type="text" placeholder="visa" value={currentId || ""} onChange={(e) => rename(e.target.value)} />
             </Field>
             <label className="check"><input type="checkbox" checked={store.default === currentId} onChange={(e) => setDefault(e.target.checked)} /><span>Use this card by default</span></label>
-            <Field label="Auto-fill on these sites — one per line (silent, no prompt)">
+            <Field label="Auto-fill on these sites — one per line or comma-separated (silent, no prompt)"
+              hint="A domain also covers its subdomains (pge.com → account.pge.com). No wildcards.">
               <textarea rows={2} placeholder={"amazon.com\nshop.example.com"} value={domainsText}
                 onChange={(e) => { setDomainsText(e.target.value); patchCard({ domains: parseDomains(e.target.value) }); }} />
+              {invalidDomains(domainsText).length > 0 && (
+                <p className="warn" style={{ marginTop: 4 }}>
+                  Not valid: {invalidDomains(domainsText).join(", ")} — won't be saved.
+                </p>
+              )}
             </Field>
             <Field label="Cardholder">
               <input type="text" placeholder="JOHN Q DOE" value={card.holder || ""} onChange={(e) => patchCard({ holder: e.target.value })} />
