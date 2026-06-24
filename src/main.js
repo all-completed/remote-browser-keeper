@@ -2,7 +2,7 @@
 // Connects to the service's keeper WebSocket, and on a "fill_request" pops up a
 // prompt asking the user for the value, then sends it straight back to the
 // service. The value never goes anywhere else.
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -306,6 +306,7 @@ function showNextPrompt() {
     });
     promptWin.show();
     promptWin.focus();
+    try { shell.beep(); } catch { /* play the OS alert sound to announce the prompt */ }
   });
   promptWin.on("closed", () => {
     // If closed without an explicit submit/cancel, treat as cancel.
