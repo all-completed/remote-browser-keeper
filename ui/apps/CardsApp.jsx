@@ -168,7 +168,14 @@ export default function CardsApp() {
 
         <div className="cardbar">
           <select id="cardSel" aria-label="Select card" value={currentId || ""} onChange={(e) => setCurrentId(e.target.value)}>
-            {ids.map((id) => <option key={id} value={id}>{id + (store.default === id ? "  (default)" : "")}</option>)}
+            {ids.map((id) => {
+              const l4 = last4(store.cards[id] && store.cards[id].number);
+              return (
+                <option key={id} value={id}>
+                  {id + (l4 ? `  ••••${l4}` : "") + (store.default === id ? "  (default)" : "")}
+                </option>
+              );
+            })}
           </select>
           <button type="button" className="ghost" onClick={newCard}>+ New</button>
           <button type="button" className="ghost danger" disabled={none} onClick={delCard}>Delete</button>
