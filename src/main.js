@@ -7,6 +7,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
+import QRCode from "qrcode";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
@@ -485,6 +486,48 @@ ipcMain.handle("fields:forget-all", () => {
   try { forgetAllFields(loadConfig().baseUrl); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
+
+let pairWin = null;
+function openPairWindow() {
+  if (pairWin) { pairWin.show(); pairWin.focus(); return; }
+  pairWin = new BrowserWindow({
+    width: 380,
+    height: 520,
+    resizable: false,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Pair phone",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "pair-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  pairWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  pairWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  pairWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(pairWin, "pair");
+  pairWin.once("ready-to-show", () => { pairWin.show(); pairWin.focus(); });
+  pairWin.on("closed", () => { pairWin = null; });
+}
+// Encode the connection config into a QR image. The token lives only inside the
+// returned image — it is never sent to the renderer as text.
+ipcMain.handle("pair:qr", async () => {
+  try {
+    const { baseUrl, apiKey } = loadConfig();
+    if (!apiKey) return { error: "No API key configured for this Keeper." };
+    const payload = JSON.stringify({ app: "rbkeeper", v: 1, url: baseUrl, key: apiKey });
+    const dataUrl = await QRCode.toDataURL(payload, { margin: 1, scale: 8, errorCorrectionLevel: "M" });
+    let host = baseUrl;
+    try { host = new URL(baseUrl).host; } catch { /* keep raw */ }
+    return { dataUrl, host };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
 ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
 ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
 ipcMain.handle("cards:save", (_e, store) => {
@@ -630,6 +673,8 @@ function updateTray() {
     { label: "Cards…", click: openCardsWindow },
     { label: "Saved fields…", click: openSavedFieldsWindow },
     { label: "History…", click: openHistoryWindow },
+    { type: "separator" },
+    { label: "Pair phone…", click: openPairWindow },
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
   ]));

@@ -21,6 +21,7 @@ export default defineConfig({
         cards: resolve(__dirname, 'ui/cards.html'),
         image: resolve(__dirname, 'ui/image.html'),
         savedfields: resolve(__dirname, 'ui/savedfields.html'),
+        pair: resolve(__dirname, 'ui/pair.html'),
       },
     },
   },
