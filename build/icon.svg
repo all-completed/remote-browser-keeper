@@ -1,0 +1,48 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Remote Browser Keeper icon: a gold key-in-shield inside a browser window,
+       on a royal-blue gradient. A guardian delivering secrets into a remote browser. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2F7DFF"/>
+      <stop offset="1" stop-color="#0A1F4D"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="392" y1="406" x2="632" y2="702" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FCE9A6"/>
+      <stop offset="0.5" stop-color="#F4C656"/>
+      <stop offset="1" stop-color="#DB9E2C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="208" fill="url(#bg)"/>
+
+  <!-- browser window (white outline) -->
+  <g fill="none" stroke="#F4F7FF" stroke-width="17" stroke-linejoin="round">
+    <rect x="252" y="298" width="520" height="428" rx="34"/>
+    <line x1="252" y1="368" x2="772" y2="368"/>
+  </g>
+  <g fill="#F4F7FF">
+    <circle cx="298" cy="333" r="9.5"/>
+    <circle cx="335" cy="333" r="9.5"/>
+    <circle cx="372" cy="333" r="9.5"/>
+  </g>
+
+  <!-- shield (gold outline; blue shows through) -->
+  <path d="M392 430
+           C392 414 404 406 418 406
+           L606 406
+           C620 406 632 414 632 430
+           L632 560
+           C632 644 578 682 512 706
+           C446 682 392 644 392 560 Z"
+        fill="none" stroke="url(#gold)" stroke-width="24" stroke-linejoin="round"/>
+
+  <!-- key (gold) -->
+  <g fill="url(#gold)">
+    <path d="M499 540 h26 v86 h-26 z"/>
+    <rect x="525" y="588" width="22" height="15"/>
+    <rect x="525" y="611" width="15" height="13"/>
+  </g>
+  <circle cx="512" cy="503" r="45" fill="url(#gold)"/>
+  <circle cx="512" cy="503" r="18" fill="#13317A"/>
+</svg>
