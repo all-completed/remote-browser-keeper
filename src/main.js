@@ -149,6 +149,10 @@ let ws = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000; // backoff, capped at 30s
 let connected = false;
+let heartbeatTimer = null;
+let lastRx = 0; // last time any frame arrived (pong or otherwise)
+const HEARTBEAT_MS = 25000; // how often we ping the service
+const DEAD_AFTER_MS = 70000; // no inbound frame this long => socket is dead
 const pending = new Map(); // request_id -> request payload (awaiting user)
 const queue = []; // request_ids waiting for the prompt window
 
@@ -169,14 +173,17 @@ function connect() {
     connected = true;
     reconnectDelay = 1000;
     safeSend({ type: "hello", app: "remote-browser-keeper", version: app.getVersion() });
+    startHeartbeat();
     updateTray();
     console.log("[keeper] connected");
   });
 
   ws.on("message", (data) => {
+    lastRx = Date.now(); // any frame proves the link is alive
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === "ping") { safeSend({ type: "pong" }); return; }
+    if (msg.type === "pong") { return; } // heartbeat reply (already counted above)
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
     if (msg.type === "fill_request" && msg.request_id) {
       msg._requested_at = new Date().toISOString();
@@ -188,8 +195,33 @@ function connect() {
     }
   });
 
-  ws.on("close", () => { connected = false; updateTray(); scheduleReconnect(); });
+  ws.on("close", () => { connected = false; stopHeartbeat(); updateTray(); scheduleReconnect(); });
   ws.on("error", (e) => { console.warn("[keeper] ws error", e.message); try { ws.close(); } catch {} });
+}
+
+// App-level heartbeat so the tray status is truthful and we recover from half-open
+// sockets (laptop sleep, network change, abrupt server restart) that deliver no
+// close event. We ping the service every HEARTBEAT_MS; if nothing comes back for
+// DEAD_AFTER_MS we terminate the socket, which fires "close" -> reconnect. The
+// service does the symmetric check and answers our ping with a pong.
+function startHeartbeat() {
+  stopHeartbeat();
+  lastRx = Date.now();
+  heartbeatTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastRx > DEAD_AFTER_MS) {
+      console.warn("[keeper] heartbeat timeout; socket is dead, forcing reconnect");
+      connected = false;
+      updateTray();
+      try { ws.terminate(); } catch { try { ws.close(); } catch {} }
+      return;
+    }
+    safeSend({ type: "ping" });
+  }, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
 }
 
 function scheduleReconnect() {
@@ -682,9 +714,14 @@ function updateTray() {
 }
 
 function createTray() {
-  // macOS shows the title (🔑) in the menu bar; an empty image keeps it text-only.
-  tray = new Tray(nativeImage.createEmpty());
-  if (process.platform === "darwin") tray.setTitle("🔑");
+  // A monochrome template image (black + alpha) — macOS renders it white on the dark
+  // menu bar and dark in light mode, matching the system icons. @2x is picked up
+  // automatically for Retina. createFromPath loads the bundled asset under src/assets.
+  const icon = nativeImage.createFromPath(path.join(__dirname, "assets", "trayTemplate.png"));
+  icon.setTemplateImage(true);
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  // Fall back to the text glyph only if the image failed to load.
+  if (process.platform === "darwin" && icon.isEmpty()) tray.setTitle("🔑");
   updateTray();
 }
 

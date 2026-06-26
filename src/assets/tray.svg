@@ -1,0 +1,8 @@
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+  <!-- Menu-bar tray glyph: a shield with a keyhole (the Keeper mark, simplified).
+       Black on transparent so macOS renders it as a template image (white on the
+       dark menu bar). Keyhole is cut out via even-odd fill. -->
+  <path fill="#000" fill-rule="evenodd" d="
+    M8 0.9 L14 3 V8 C14 12 8 15.1 8 15.1 C8 15.1 2 12 2 8 V3 Z
+    M8 4.6 C6.85 4.6 5.95 5.5 5.95 6.6 C5.95 7.35 6.35 8 6.95 8.4 L6.35 11.1 H9.65 L9.05 8.4 C9.65 8 10.05 7.35 10.05 6.6 C10.05 5.5 9.15 4.6 8 4.6 Z"/>
+</svg>
