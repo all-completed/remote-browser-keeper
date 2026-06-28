@@ -185,6 +185,9 @@ function connect() {
     if (msg.type === "ping") { safeSend({ type: "pong" }); return; }
     if (msg.type === "pong") { return; } // heartbeat reply (already counted above)
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
+    // Another keeper (or a timeout) already resolved this request server-side —
+    // dismiss our prompt for it so the user isn't asked twice.
+    if (msg.type === "request_resolved" && msg.request_id) { dismissRequest(msg.request_id); return; }
     if (msg.type === "fill_request" && msg.request_id) {
       msg._requested_at = new Date().toISOString();
       if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
@@ -360,6 +363,20 @@ function resolveRequest(requestId, payload) {
   pending.delete(requestId);
   if (queue[0] === requestId) queue.shift();
   if (promptWin) { const w = promptWin; promptWin = null; w.close(); }
+  showNextPrompt();
+}
+
+// Drop a request that was resolved elsewhere (another keeper answered it, or it timed
+// out). Unlike resolveRequest, we do NOT send a fill_response — the server is no longer
+// waiting on us. Removing it from `pending` first stops the prompt's closed-handler from
+// firing a spurious cancel.
+function dismissRequest(requestId) {
+  if (!pending.has(requestId) && queue.indexOf(requestId) === -1) return; // not ours / already gone
+  const wasCurrent = queue[0] === requestId;
+  pending.delete(requestId);
+  const i = queue.indexOf(requestId);
+  if (i !== -1) queue.splice(i, 1);
+  if (wasCurrent && promptWin) { const w = promptWin; promptWin = null; w.close(); }
   showNextPrompt();
 }
 
