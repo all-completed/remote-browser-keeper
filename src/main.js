@@ -189,6 +189,7 @@ function connect() {
     // dismiss our prompt for it so the user isn't asked twice.
     if (msg.type === "request_resolved" && msg.request_id) { dismissRequest(msg.request_id); return; }
     if (msg.type === "fill_request" && msg.request_id) {
+      if (pending.has(msg.request_id)) return; // dedup: server replays pending on reconnect
       msg._requested_at = new Date().toISOString();
       if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
       if (tryAutofillFields(msg)) return; // every field saved with "don't ask again"
