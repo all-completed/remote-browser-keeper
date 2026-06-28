@@ -30,7 +30,7 @@ function HistoryEntry({ it }) {
   return (
     <div className="entry">
       <div className="top">
-        <span className={"badge " + (outcome === "submitted" ? "ok" : "no")}>{outcome}</span>
+        <span className={"badge " + (outcome === "submitted" || outcome === "autofilled" ? "ok" : "no")}>{outcome}</span>
         <span className="time" title={`requested: ${fmtTime(it.requested_at)}\nresolved: ${fmtTime(it.resolved_at)}`}>
           {fmtTime(it.resolved_at || it.requested_at)}
         </span>
