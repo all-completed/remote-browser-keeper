@@ -13,6 +13,7 @@
   --card-bg: linear-gradient(180deg, #0B1220 0%, rgba(11, 18, 32, 0.55) 100%);
   --ok: #34D399;
   --no: #F87171;
+  --warn: #FBBF24;
 }
 
 * { box-sizing: border-box; }
@@ -56,6 +57,7 @@ body {
 }
 .badge.ok { color: var(--ok); background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.30); }
 .badge.no { color: var(--no); background: rgba(248, 113, 113, 0.10); border: 1px solid rgba(248, 113, 113, 0.28); }
+.badge.warn { color: var(--warn); background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.32); }
 .time { font-size: 11.5px; color: var(--muted); margin-left: auto; }
 
 .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

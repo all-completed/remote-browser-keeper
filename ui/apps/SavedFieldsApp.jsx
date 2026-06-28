@@ -70,7 +70,7 @@ export default function SavedFieldsApp() {
             {items.map((e, i) => (
               <div className="entry" key={(e.session || "") + "|" + e.host + "|" + e.selector + "|" + i}>
                 <div className="top">
-                  <span className={"badge " + (e.scope === "forever" ? "ok" : "no")}>
+                  <span className={"badge " + (e.scope === "forever" ? "ok" : "warn")}>
                     {e.scope === "forever" ? "saved securely" : "until restart"}
                   </span>
                   {e.auto && <span className="badge">auto-fill</span>}
