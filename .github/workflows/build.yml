@@ -7,6 +7,7 @@ name: build
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
     paths-ignore:
       - "**.md"
       - "docs/**"
@@ -59,3 +60,32 @@ jobs:
             dist/*.exe
             dist/*.AppImage
             dist/*.tar.gz
+
+  # On a version tag (vX.Y.Z), gather the per-OS installers and publish a GitHub
+  # Release. The Keeper Download page links to /releases/latest/download/<asset>, so
+  # the asset names must be the canonical ones set via electron-builder artifactName.
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect installers
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \) -exec cp -v {} release/ \;
+          echo "--- release assets ---"; ls -la release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

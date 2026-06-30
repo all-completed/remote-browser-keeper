@@ -38,6 +38,7 @@
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "build/icon.icns",
+      "artifactName": "RemoteBrowserKeeper-mac-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -57,16 +58,10 @@
     },
     "win": {
       "icon": "build/icon.ico",
+      "artifactName": "RemoteBrowserKeeper-win-${arch}.${ext}",
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "portable",
           "arch": [
             "x64",
             "arm64"
@@ -77,6 +72,7 @@
     "linux": {
       "category": "Utility",
       "icon": "build/icon.png",
+      "artifactName": "RemoteBrowserKeeper-linux-${arch}.${ext}",
       "target": [
         {
           "target": "AppImage",
