@@ -14,7 +14,7 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   // regenerate button. The value is created in the Keeper, never seen by the agent.
   if (field.generate) {
     return (
-      <Field label={label} hint={d.hint || "Generated in the Keeper — review, then Send"}>
+      <Field label={label} selector={field.selector} hint={d.hint || "Generated in the Keeper — review, then Send"}>
         <div className="inrow">
           <input
             type="text"
@@ -37,7 +37,7 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   // Expiry month / year → dropdown.
   if (d.mode === "month" || d.mode === "year") {
     return (
-      <Field label={label} hint={d.hint}>
+      <Field label={label} selector={field.selector} hint={d.hint}>
         <select value={value || ""} onChange={(e) => onChange(e.target.value)}>
           <option value="">{d.mode === "month" ? "Month (MM)" : "Year"}</option>
           {d.options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -48,7 +48,7 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
 
   if (d.mode === "multiline") {
     return (
-      <Field label={label} hint={d.hint}>
+      <Field label={label} selector={field.selector} hint={d.hint}>
         <textarea
           rows={3}
           value={value || ""}
@@ -63,7 +63,7 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   }
 
   return (
-    <Field label={label} hint={d.hint}>
+    <Field label={label} selector={field.selector} hint={d.hint}>
       <RevealInput
         secret={d.secret}
         value={value || ""}

@@ -2,10 +2,25 @@ import { useState } from "react";
 
 // A labeled form field: a caption above the control, optional hint below. Shared
 // by the prompt and the Saved-cards form so both use the same structure/styling.
-export function Field({ label, hint, children }) {
+export function Field({ label, hint, selector, children }) {
   return (
     <label className="fld">
       <span>{label}</span>
+      {selector ? (
+        <span
+          className="selector"
+          title="The exact element the service will fill"
+          style={{
+            fontFamily: "ui-monospace, monospace",
+            fontSize: 11.5,
+            color: "var(--muted2)",
+            wordBreak: "break-all",
+            margin: "1px 0 3px",
+          }}
+        >
+          {selector}
+        </span>
+      ) : null}
       {children}
       {hint ? <span className="hint">{hint}</span> : null}
     </label>
