@@ -18,7 +18,12 @@ function sanitizeForPath(s) {
 function fieldsPath(baseUrl) {
   return path.join(app.getPath("home"), ".remote-browser-keeper", sanitizeForPath(baseUrl), "fields.json");
 }
-function keyOf(session, host, selector) { return `${session || ""}|${host}|${selector}`; }
+// Normalize the parts so the same field always maps to ONE key — incidental
+// whitespace in the agent-supplied selector (or session) otherwise creates a second,
+// identical-looking entry AND makes auto-fill miss the saved value (→ re-prompt → dup).
+function keyOf(session, host, selector) {
+  return `${String(session || "").trim()}|${host}|${String(selector || "").trim()}`;
+}
 function loadPersisted(baseUrl) {
   const obj = readJson(fieldsPath(baseUrl));
   return obj && typeof obj === "object" ? obj : {};
@@ -80,17 +85,20 @@ function parseKey(k) {
 
 // List saved entries (metadata only — NEVER the value) for the management window.
 export function listSaved(baseUrl) {
-  const out = [];
-  for (const [k, e] of memory.entries()) {
+  // Dedup by normalized session|host|selector so the same field never shows twice
+  // (whitespace-different keys, or a key present in both memory and persisted). A
+  // persisted "forever" entry wins over an in-memory "session" one.
+  const byKey = new Map();
+  const add = (k, scope, auto) => {
     const p = parseKey(k);
-    if (p) out.push({ ...p, scope: "session", auto: !!unwrap(e).auto });
-  }
+    if (!p) return;
+    const norm = `${p.session.trim()}|${p.host}|${p.selector.trim()}`;
+    if (scope === "forever" || !byKey.has(norm)) byKey.set(norm, { ...p, scope, auto });
+  };
+  for (const [k, e] of memory.entries()) add(k, "session", !!unwrap(e).auto);
   const persisted = loadPersisted(baseUrl);
-  for (const k of Object.keys(persisted)) {
-    const p = parseKey(k);
-    if (p) out.push({ ...p, scope: "forever", auto: !!unwrap(persisted[k]).auto });
-  }
-  return out;
+  for (const k of Object.keys(persisted)) add(k, "forever", !!unwrap(persisted[k]).auto);
+  return [...byKey.values()];
 }
 
 export function forgetAll(baseUrl) {
