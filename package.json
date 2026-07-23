@@ -9,6 +9,7 @@
   "scripts": {
     "build:ui": "vite build",
     "dev:ui": "vite",
+    "test": "node --test test/",
     "start": "npm run build:ui && electron .",
     "dist": "npm run build:ui && electron-builder"
   },

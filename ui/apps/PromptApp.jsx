@@ -159,17 +159,18 @@ export default function PromptApp() {
                   const v = e.target.value;
                   setSaveScope(v);
                   // Default "don't ask again" on when a save scope is chosen.
-                  setDontAsk(v === "session" || v === "forever");
+                  setDontAsk(v === "session" || v === "forever" || v === "vault");
                 }}
               >
                 {!savedExisting && <option value="">Don't save</option>}
                 <option value="session">Until the Keeper restarts</option>
-                <option value="forever">Save securely (until I remove it)</option>
+                <option value="forever">Save securely on this device</option>
+                <option value="vault">Save to vault (synced across devices)</option>
                 {savedExisting && <option value="forget">Forget saved value</option>}
               </select>
             </Field>
           )}
-          {hasNonCard && (saveScope === "session" || saveScope === "forever") && (
+          {hasNonCard && (saveScope === "session" || saveScope === "forever" || saveScope === "vault") && (
             <label
               style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted2)", fontSize: 12.5, cursor: "pointer", marginTop: -6 }}
             >

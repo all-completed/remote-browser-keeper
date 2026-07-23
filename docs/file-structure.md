@@ -72,6 +72,8 @@ prod Keeper keep separate stores automatically:
     ├── history.jsonl                   # value-free request log (newest appended)
     ├── secrets.json                    # session-unlock secrets (by secret_id)
     ├── cards.json                      # OPTIONAL saved cards for card auto-fill
+    ├── fields.json                     # "forever" saved field values (this device only)
+    ├── vault.json                      # "vault" saved fields — local cache of the synced vault
     ├── screenshots/
     │   └── <request_id>.jpg            # proof image for that request
     └── logs/
@@ -156,6 +158,28 @@ zip, state, country } } } }`.
 > the CVV at rest, omit it and the Keeper prompts for it. (Secrets — `secrets.json` —
 > stay a filesystem vault for now; they're provisioned by an external script. See the
 > service repo `docs/TODO.md`.)
+
+### `vault.json` — the synced vault (saved fields across devices)
+
+`~/.remote-browser-keeper/<base-url>/vault.json`, OS-encrypted at rest exactly like
+`cards.json`. When the fill prompt saves a value with the **"Save to vault (synced
+across devices)"** scope (beside *"Until the Keeper restarts"* and *"Save securely on
+this device"*), it lands here **and** is end-to-end encrypted and synced to every
+paired Keeper through the service's `/api/vault` endpoint.
+
+- **Zero-knowledge:** the value is encrypted client-side with the session `secret`
+  the Keeper already holds (`secrets.js`, key = `sha256(secret)`, **AES-256-GCM**,
+  envelope `iv(12)‖ciphertext‖tag(16)`, `format` = `aesgcm-sha256-v1`). The service
+  stores only opaque ciphertext and holds no key — see the service repo
+  `docs/vault-sync.md`. The layout is plain-WebCrypto so the mobile Keeper shares the
+  same blob.
+- **Sync (`src/vault.js`):** on connect and after each vault save/forget the Keeper
+  pulls the remote blob, merges it into the local cache (per-entry **last-write-wins**
+  by `updated_at`, deletes leave a tombstone so they propagate), and pushes the union
+  back — retrying on the service's optimistic-`version` 409s.
+- Provisioning: the pair QR (**Pair phone…**) now also carries the session `secret`
+  (inside the image only, never as renderer text) so the mobile Keeper can decrypt the
+  shared vault.
 
 ### Electron user-data dir (separate)
 

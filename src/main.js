@@ -12,7 +12,8 @@ import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
-import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields } from "./fieldstore.js";
+import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
+import { syncVault } from "./vault.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -176,6 +177,8 @@ function connect() {
     startHeartbeat();
     updateTray();
     console.log("[keeper] connected");
+    // Pull any vault entries saved on another paired device (and push ours).
+    void syncVaultNow();
   });
 
   ws.on("message", (data) => {
@@ -260,6 +263,34 @@ function handleSecretRequest(msg) {
   } else {
     safeSend({ type: "secret_response", request_id: msg.request_id, denied: true });
     console.warn("[keeper] secret_request", sidShort, "-> not in vault, denied");
+  }
+}
+
+// Sync the "vault"-scoped saved fields with the service: pull the remote blob,
+// merge it into the local cache (last-write-wins), and push the union back. The
+// service only ever sees opaque ciphertext (see vault.js). Best-effort — quietly
+// no-ops when there's no API key or no held session secret to key the vault with.
+let vaultSyncing = false;
+async function syncVaultNow() {
+  if (vaultSyncing) return;
+  let cfg;
+  try { cfg = loadConfig(); } catch { return; }
+  if (!cfg.apiKey) return;
+  let secret = null;
+  try { secret = createSecretStore({ baseUrl: cfg.baseUrl }).firstSecret(); } catch { /* ignore */ }
+  if (!secret) return; // no key to encrypt/decrypt the vault with yet
+  vaultSyncing = true;
+  try {
+    await syncVault(
+      { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
+      secret,
+      (remoteFields) => mergeRemoteVault(cfg.baseUrl, remoteFields),
+    );
+    console.log("[keeper] vault synced");
+  } catch (e) {
+    console.warn("[keeper] vault sync failed:", e.message);
+  } finally {
+    vaultSyncing = false;
   }
 }
 
@@ -530,11 +561,16 @@ ipcMain.handle("fields:list", () => {
   try { return listSaved(loadConfig().baseUrl); } catch { return []; }
 });
 ipcMain.handle("fields:forget", (_e, { session, host, selector } = {}) => {
-  try { forgetField(loadConfig().baseUrl, session, host, selector); return { ok: true }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  try {
+    const { baseUrl } = loadConfig();
+    const wasVault = getSaved(baseUrl, session, host, selector)?.scope === "vault";
+    forgetField(baseUrl, session, host, selector);
+    if (wasVault) void syncVaultNow(); // propagate the tombstone to other devices
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 ipcMain.handle("fields:forget-all", () => {
-  try { forgetAllFields(loadConfig().baseUrl); return { ok: true }; }
+  try { forgetAllFields(loadConfig().baseUrl); void syncVaultNow(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -570,7 +606,12 @@ ipcMain.handle("pair:qr", async () => {
   try {
     const { baseUrl, apiKey } = loadConfig();
     if (!apiKey) return { error: "No API key configured for this Keeper." };
-    const payload = JSON.stringify({ app: "rbkeeper", v: 1, url: baseUrl, key: apiKey });
+    // Also hand the paired device the session `secret`, if we hold one, so it can
+    // encrypt/decrypt the synced vault (see vault.js). Like the API key, it lives
+    // only inside the QR image — never sent to the renderer as text or over a URL.
+    let secret = null;
+    try { secret = createSecretStore({ baseUrl }).firstSecret(); } catch { /* none held */ }
+    const payload = JSON.stringify({ app: "rbkeeper", v: 1, url: baseUrl, key: apiKey, ...(secret ? { secret } : {}) });
     const dataUrl = await QRCode.toDataURL(payload, { margin: 1, scale: 8, errorCorrectionLevel: "M" });
     let host = baseUrl;
     try { host = new URL(baseUrl).host; } catch { /* keep raw */ }
@@ -677,16 +718,23 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
 });
 ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = {}) => {
   try {
-    if (!Array.isArray(values) || !["session", "forever", "forget"].includes(scope)) return { ok: false };
+    if (!Array.isArray(values) || !["session", "forever", "vault", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
     if (!req) return { ok: false };
     const { baseUrl } = loadConfig();
     const host = hostFromUrl(req.url || "");
+    let touchedVault = scope === "vault";
     for (const v of values) {
       if (!v || !v.selector) continue;
-      if (scope === "forget") forgetField(baseUrl, req.session_id, host, v.selector);
-      else if (v.value) saveValue(baseUrl, req.session_id, host, v.selector, v.value, scope, auto);
+      if (scope === "forget") {
+        // A forget may tombstone a vault entry, so it too needs a push.
+        if (getSaved(baseUrl, req.session_id, host, v.selector)?.scope === "vault") touchedVault = true;
+        forgetField(baseUrl, req.session_id, host, v.selector);
+      } else if (v.value) {
+        saveValue(baseUrl, req.session_id, host, v.selector, v.value, scope, auto);
+      }
     }
+    if (touchedVault) void syncVaultNow(); // push the new/removed vault entry to other devices
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };

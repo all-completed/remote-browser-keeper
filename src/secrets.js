@@ -84,6 +84,17 @@ class FileSystemSecretStore {
   listSecretIds() {
     return Object.keys(this._read().secrets || {});
   }
+
+  // The session secret to key the synced vault with (vault.js). The vault is
+  // per-user and there is normally exactly one held secret; if several exist we
+  // take the first that still verifies against its id. Returns null when none.
+  firstSecret() {
+    for (const id of this.listSecretIds()) {
+      const s = this.getSecret(id);
+      if (s) return s;
+    }
+    return null;
+  }
 }
 
 // Factory — returns the Phase 1 filesystem backend. A future Keychain backend is
