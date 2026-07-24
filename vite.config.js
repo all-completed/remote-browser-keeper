@@ -22,6 +22,7 @@ export default defineConfig({
         image: resolve(__dirname, 'ui/image.html'),
         savedfields: resolve(__dirname, 'ui/savedfields.html'),
         pair: resolve(__dirname, 'ui/pair.html'),
+        vaultpw: resolve(__dirname, 'ui/vaultpw.html'),
       },
     },
   },

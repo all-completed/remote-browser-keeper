@@ -13,7 +13,8 @@ import { createSecretStore } from "./secrets.js";
 import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
-import { syncVault } from "./vault.js";
+import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
+import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -266,29 +267,75 @@ function handleSecretRequest(msg) {
   }
 }
 
-// Sync the "vault"-scoped saved fields with the service: pull the remote blob,
-// merge it into the local cache (last-write-wins), and push the union back. The
-// service only ever sees opaque ciphertext (see vault.js). Best-effort — quietly
-// no-ops when there's no API key or no held session secret to key the vault with.
+// Resolve the vault key to sync with. The vault has its own DEDICATED password
+// (vaultkey.js), independent of the session secret. Returns { key } to sync with,
+// { repair: true } when this device must re-pair to pick up a password another device
+// set, or { transient: true } on a network hiccup. Handles the one-time v1->v2
+// migration (the old vault was keyed by the session secret with a leaked secret_id).
+let vaultNeedsRepair = false;
+async function resolveVaultKey(cfg) {
+  const existing = loadVaultKey(cfg.baseUrl);
+  if (existing) return { key: existing };
+  // No local vault key yet — decide from the server: fresh-generate, migrate, or re-pair.
+  let status = 0, body = null;
+  try {
+    const res = await fetch(cfg.baseUrl.replace(/\/+$/, "") + "/api/vault", { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+    status = res.status;
+    if (res.ok) body = await res.json();
+    else if (status !== 404) return { transient: true };
+  } catch { return { transient: true }; }
+  if (status === 404 || !body) return { key: saveVaultKey(cfg.baseUrl, generateVaultKey()) }; // brand-new
+  if (body.format === FORMAT_V1) {
+    let sessionSecret = null;
+    try { sessionSecret = createSecretStore({ baseUrl: cfg.baseUrl }).firstSecret(); } catch { /* none */ }
+    if (sessionSecret && body.secret_id === legacyV1SecretId(sessionSecret)) {
+      const data = decryptLegacyV1(sessionSecret, body.ciphertext); // lift the old blob…
+      const key = generateVaultKey();                                // …under a fresh dedicated key
+      const put = await putVault(cfg, key, data, Number(body.version) || 0, {});
+      if (put.conflict) return { transient: true };
+      saveVaultKey(cfg.baseUrl, key);
+      console.log("[keeper] vault migrated v1 -> v2 (dedicated key, leaked secret_id retired)");
+      return { key };
+    }
+    return { repair: true }; // v1 but not ours to decrypt
+  }
+  return { repair: true }; // already v2 under an unknown password — re-pair to get it
+}
+
+// Sync the "vault"-scoped saved fields with the service: pull the remote blob, merge it
+// into the local cache (last-write-wins), and push the union back. The service only ever
+// sees opaque ciphertext (see vault.js). Best-effort — quietly no-ops without an API key.
 let vaultSyncing = false;
 async function syncVaultNow() {
   if (vaultSyncing) return;
   let cfg;
   try { cfg = loadConfig(); } catch { return; }
   if (!cfg.apiKey) return;
-  let secret = null;
-  try { secret = createSecretStore({ baseUrl: cfg.baseUrl }).firstSecret(); } catch { /* ignore */ }
-  if (!secret) return; // no key to encrypt/decrypt the vault with yet
   vaultSyncing = true;
   try {
+    const r = await resolveVaultKey(cfg);
+    if (r.transient) return;
+    if (r.repair) {
+      if (!vaultNeedsRepair) console.warn("[keeper] vault: this device needs to re-pair to get the vault password");
+      vaultNeedsRepair = true;
+      updateTray();
+      return;
+    }
+    vaultNeedsRepair = false;
     await syncVault(
       { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
-      secret,
+      r.key,
       (remoteFields) => mergeRemoteVault(cfg.baseUrl, remoteFields),
     );
     console.log("[keeper] vault synced");
   } catch (e) {
-    console.warn("[keeper] vault sync failed:", e.message);
+    if (e instanceof VaultKeyMismatch) {
+      if (!vaultNeedsRepair) console.warn("[keeper] vault:", e.message);
+      vaultNeedsRepair = true;
+      updateTray();
+    } else {
+      console.warn("[keeper] vault sync failed:", e.message);
+    }
   } finally {
     vaultSyncing = false;
   }
@@ -600,18 +647,47 @@ function openPairWindow() {
   pairWin.once("ready-to-show", () => { pairWin.show(); pairWin.focus(); });
   pairWin.on("closed", () => { pairWin = null; });
 }
+
+let vaultPwWin = null;
+function openVaultPwWindow() {
+  if (vaultPwWin) { vaultPwWin.show(); vaultPwWin.focus(); return; }
+  vaultPwWin = new BrowserWindow({
+    width: 400,
+    height: 360,
+    resizable: false,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Vault password",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "vaultpw-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  vaultPwWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  vaultPwWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  vaultPwWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(vaultPwWin, "vaultpw");
+  vaultPwWin.once("ready-to-show", () => { vaultPwWin.show(); vaultPwWin.focus(); });
+  vaultPwWin.on("closed", () => { vaultPwWin = null; });
+}
 // Encode the connection config into a QR image. The token lives only inside the
 // returned image — it is never sent to the renderer as text.
 ipcMain.handle("pair:qr", async () => {
   try {
     const { baseUrl, apiKey } = loadConfig();
     if (!apiKey) return { error: "No API key configured for this Keeper." };
-    // Also hand the paired device the session `secret`, if we hold one, so it can
-    // encrypt/decrypt the synced vault (see vault.js). Like the API key, it lives
-    // only inside the QR image — never sent to the renderer as text or over a URL.
+    // Hand the paired device the session `secret` (for zero-knowledge session unlock)
+    // AND the dedicated vault password (so it can decrypt the synced vault, item 2).
+    // Both live ONLY inside the QR image — never sent to the renderer as text or a URL.
     let secret = null;
     try { secret = createSecretStore({ baseUrl }).firstSecret(); } catch { /* none held */ }
-    const payload = JSON.stringify({ app: "rbkeeper", v: 1, url: baseUrl, key: apiKey, ...(secret ? { secret } : {}) });
+    let vault = null;
+    try { vault = vaultKeyForPairing(baseUrl); } catch { /* none */ }
+    const payload = JSON.stringify({ app: "rbkeeper", v: 1, url: baseUrl, key: apiKey, ...(secret ? { secret } : {}), ...(vault ? { vault } : {}) });
     const dataUrl = await QRCode.toDataURL(payload, { margin: 1, scale: 8, errorCorrectionLevel: "M" });
     let host = baseUrl;
     try { host = new URL(baseUrl).host; } catch { /* keep raw */ }
@@ -619,6 +695,43 @@ ipcMain.handle("pair:qr", async () => {
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// Vault key status for the UI: whether a key is held, whether it's a custom (user)
+// password, and whether this device is out of sync (needs re-pair).
+ipcMain.handle("keeper:vault-status", () => {
+  try {
+    const { baseUrl } = loadConfig();
+    const k = loadVaultKey(baseUrl);
+    return { ok: true, hasKey: !!k, custom: !!(k && k.format === "aesgcm-pbkdf2-v2"), needsRepair: vaultNeedsRepair };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Item 3: set a user-chosen vault password. Reads the current vault under the current
+// key, re-encrypts it under the new password (pbkdf2), and re-uploads — so no data is
+// lost. Other paired devices then see a secret_id mismatch and must re-pair to resync.
+ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
+  try {
+    const cfg = loadConfig();
+    if (!cfg.apiKey) return { ok: false, error: "No API key configured." };
+    const pw = String(password || "");
+    if (pw.length < 8) return { ok: false, error: "Use at least 8 characters." };
+    if (vaultNeedsRepair) return { ok: false, error: "This device is out of sync — re-pair it first." };
+    const conn = { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+    const oldKey = loadVaultKey(cfg.baseUrl) || ensureVaultKey(cfg.baseUrl);
+    let current;
+    try { current = await pullVault(conn, oldKey); }
+    catch (e) {
+      if (e instanceof VaultKeyMismatch) return { ok: false, error: "This device is out of sync — re-pair it first." };
+      return { ok: false, error: e.message };
+    }
+    const newKey = userVaultKey(pw);
+    const put = await putVault(conn, newKey, current.data || emptyVault(), current.version);
+    if (put.conflict) return { ok: false, error: "Vault changed during re-key — try again." };
+    saveVaultKey(cfg.baseUrl, newKey);
+    console.log("[keeper] vault re-keyed to a custom password (pbkdf2-v2); other devices must re-pair");
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
 ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
@@ -774,6 +887,8 @@ function updateTray() {
     { label: "History…", click: openHistoryWindow },
     { type: "separator" },
     { label: "Pair phone…", click: openPairWindow },
+    { label: "Set vault password…", click: openVaultPwWindow },
+    ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
   ]));

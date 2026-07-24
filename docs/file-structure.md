@@ -167,19 +167,37 @@ across devices)"** scope (beside *"Until the Keeper restarts"* and *"Save secure
 this device"*), it lands here **and** is end-to-end encrypted and synced to every
 paired Keeper through the service's `/api/vault` endpoint.
 
-- **Zero-knowledge:** the value is encrypted client-side with the session `secret`
-  the Keeper already holds (`secrets.js`, key = `sha256(secret)`, **AES-256-GCM**,
-  envelope `iv(12)‖ciphertext‖tag(16)`, `format` = `aesgcm-sha256-v1`). The service
-  stores only opaque ciphertext and holds no key — see the service repo
-  `docs/vault-sync.md`. The layout is plain-WebCrypto so the mobile Keeper shares the
-  same blob.
+- **Zero-knowledge (key model v2, `src/vault.js` + `src/vaultkey.js`):** the value is
+  encrypted client-side with a **dedicated vault password**, independent of the session
+  secret and stored OS-encrypted in `vault-key.json` (see below). Two values are derived
+  with **domain separation** so the identifier can never equal the key:
+  `master = sha256(password)` (generated key) or `pbkdf2_sha256(password, salt)` (a
+  user-set password); `encKey = master`; `secret_id = sha256("rbvault-id-v2" ‖ master)`.
+  **AES-256-GCM**, envelope `iv(12)‖ct‖tag` (or `salt(16)‖iv‖ct‖tag` for pbkdf2),
+  `format` = `aesgcm-sha256-v2` / `aesgcm-pbkdf2-v2`. The service stores only opaque
+  ciphertext + the (non-key) `secret_id` — see the service repo `docs/vault-sync.md`.
+  Plain-WebCrypto layout, so the mobile Keeper shares the same blob.
+  > **v1 → v2 fix:** v1 set `secret_id = sha256(secret) === the AES key`, which the
+  > service stored in plaintext (the key leaked). v2 domain-separates them. An existing
+  > v1 vault is auto-migrated on first run (decrypt with the session secret → re-encrypt
+  > under a fresh generated password → re-upload).
 - **Sync (`src/vault.js`):** on connect and after each vault save/forget the Keeper
   pulls the remote blob, merges it into the local cache (per-entry **last-write-wins**
   by `updated_at`, deletes leave a tombstone so they propagate), and pushes the union
-  back — retrying on the service's optimistic-`version` 409s.
-- Provisioning: the pair QR (**Pair phone…**) now also carries the session `secret`
-  (inside the image only, never as renderer text) so the mobile Keeper can decrypt the
-  shared vault.
+  back — retrying on the service's optimistic-`version` 409s. A `secret_id` mismatch on
+  pull means the vault password changed elsewhere → the tray shows "re-pair to update".
+- Provisioning: the pair QR (**Pair phone…**) carries the dedicated **vault password**
+  (and the session `secret`) inside the image only — never as renderer text — so the
+  mobile Keeper can decrypt the shared vault.
+
+### `vault-key.json` — the vault's dedicated password
+
+`~/.remote-browser-keeper/<base-url>/vault-key.json`, **OS-encrypted at rest** (Electron
+`safeStorage` → macOS Keychain / Windows DPAPI / libsecret), holds `{ password, format,
+salt? }`. The Keeper generates a high-entropy password on first use; the user may replace
+it with their own via **Set vault password…** (which re-encrypts + re-uploads the vault,
+after which other devices must re-pair). This file never leaves the machine except as the
+vault password inside a pair QR.
 
 ### Electron user-data dir (separate)
 
