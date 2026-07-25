@@ -58,7 +58,16 @@ export default function PromptApp() {
     (async () => {
       let saved = [];
       try { saved = await window.keeper.savedValues(req.request_id); } catch { /* ignore */ }
-      if (cancelled || !Array.isArray(saved) || !saved.length) return;
+      if (cancelled) return;
+      if (!Array.isArray(saved) || !saved.length) {
+        // No previously-saved value: default a (non-generate) field to the synced vault
+        // when a vault key is held — generate is already defaulted above. The user can
+        // still switch to on-device or Don't save in the prompt.
+        if (!hasGen) {
+          try { const s = await window.keeper.vaultStatus?.(); if (!cancelled && s && s.ok && s.hasKey) setSaveScope("vault"); } catch { /* ignore */ }
+        }
+        return;
+      }
       setValues((m) => {
         const next = { ...m };
         for (const v of saved) {
