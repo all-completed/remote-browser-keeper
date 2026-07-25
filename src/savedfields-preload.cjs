@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld("savedFields", {
   list: () => ipcRenderer.invoke("fields:list"),
   forget: (entry) => ipcRenderer.invoke("fields:forget", entry),
   forgetAll: () => ipcRenderer.invoke("fields:forget-all"),
+  // Reveal a single saved value on demand (stays local — for reading a generated password).
+  reveal: (entry) => ipcRenderer.invoke("fields:reveal", entry),
 });

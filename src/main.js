@@ -619,6 +619,14 @@ function openSavedFieldsWindow() {
 ipcMain.handle("fields:list", () => {
   try { return listSaved(loadConfig().baseUrl); } catch { return []; }
 });
+// Reveal a single saved value on demand (e.g. to read a generated password you never
+// saw). The value stays local — returned only to this window's renderer, never the AI.
+ipcMain.handle("fields:reveal", (_e, { session, host, selector } = {}) => {
+  try {
+    const s = getSaved(loadConfig().baseUrl, session, host, selector);
+    return { ok: true, value: s ? s.value : null };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
 ipcMain.handle("fields:forget", (_e, { session, host, selector } = {}) => {
   try {
     const { baseUrl } = loadConfig();

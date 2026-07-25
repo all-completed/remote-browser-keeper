@@ -7,6 +7,19 @@ export default function SavedFieldsApp() {
   const [items, setItems] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [confirm, setConfirm] = useState(null); // { type: "all" } | { type: "one", entry }
+  const [shown, setShown] = useState({}); // entryKey -> revealed value (in-memory only)
+
+  const keyOf = (e) => (e.session || "") + "|" + e.host + "|" + e.selector;
+  // Reveal (or hide) a single saved value on demand — useful for reading a generated
+  // password you never saw. The value is fetched only when asked and kept in memory.
+  const toggleReveal = async (e) => {
+    const k = keyOf(e);
+    if (shown[k] != null) { setShown((m) => { const n = { ...m }; delete n[k]; return n; }); return; }
+    let r;
+    try { r = await window.savedFields.reveal({ session: e.session, host: e.host, selector: e.selector }); } catch { r = null; }
+    if (r && r.ok && r.value != null) setShown((m) => ({ ...m, [k]: r.value }));
+  };
+  const copy = (v) => { try { navigator.clipboard.writeText(v); } catch { /* ignore */ } };
 
   const refresh = async () => {
     let list = [];
@@ -38,7 +51,7 @@ export default function SavedFieldsApp() {
       <main id="wrap">
         <header id="head">
           <div id="title">Saved fields</div>
-          <div id="sub">Values you chose to keep on this machine. They are encrypted at rest, never shown here, and never sent to the AI.</div>
+          <div id="sub">Values you chose to keep. Encrypted at rest and never sent to the AI; shown only when you tap <b>Reveal</b>.</div>
           <div id="actions">
             <button type="button" className="sf-btn" onClick={refresh}>Refresh</button>
             {items.length > 0 && (
@@ -70,11 +83,14 @@ export default function SavedFieldsApp() {
             {items.map((e, i) => (
               <div className="entry" key={(e.session || "") + "|" + e.host + "|" + e.selector + "|" + i}>
                 <div className="top">
-                  <span className={"badge " + (e.scope === "forever" ? "ok" : "warn")}>
-                    {e.scope === "forever" ? "saved securely" : "until restart"}
+                  <span className={"badge " + (e.scope === "warn-never" ? "warn" : e.scope === "session" ? "warn" : "ok")}>
+                    {e.scope === "vault" ? "vault · synced" : e.scope === "forever" ? "saved securely" : "until restart"}
                   </span>
                   {e.auto && <span className="badge">auto-fill</span>}
-                  <button type="button" className="sf-btn" style={{ marginLeft: "auto" }} onClick={() => setConfirm({ type: "one", entry: e })}>Forget</button>
+                  <button type="button" className="sf-btn" style={{ marginLeft: "auto" }} onClick={() => toggleReveal(e)}>
+                    {shown[keyOf(e)] != null ? "Hide" : "Reveal"}
+                  </button>
+                  <button type="button" className="sf-btn" onClick={() => setConfirm({ type: "one", entry: e })}>Forget</button>
                 </div>
                 <div className="meta">
                   <span className="chip url" title={e.host}>{e.host}</span>
@@ -84,6 +100,13 @@ export default function SavedFieldsApp() {
                   <span className="k">selector: </span>
                   {e.selector}
                 </div>
+                {shown[keyOf(e)] != null && (
+                  <div className="fields" style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span className="k">value: </span>
+                    <code style={{ userSelect: "all", wordBreak: "break-all", background: "rgba(255,255,255,.06)", padding: "2px 6px", borderRadius: 5 }}>{shown[keyOf(e)]}</code>
+                    <button type="button" className="sf-btn" onClick={() => copy(shown[keyOf(e)])}>Copy</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
