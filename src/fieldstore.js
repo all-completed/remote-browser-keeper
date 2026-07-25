@@ -146,7 +146,10 @@ export function listSaved(baseUrl) {
   for (const k of Object.keys(persisted)) add(k, "forever", !!unwrap(persisted[k]).auto);
   const vaultFields = loadVaultFields(baseUrl);
   for (const k of Object.keys(vaultFields)) if (isLive(vaultFields[k])) add(k, "vault", !!vaultFields[k].auto);
-  return [...byKey.values()];
+  // Show synced "vault" fields first (they're the cross-device ones people look for),
+  // then on-device "forever", then in-memory "session".
+  const rank = { vault: 0, forever: 1, session: 2 };
+  return [...byKey.values()].sort((a, b) => (rank[a.scope] ?? 3) - (rank[b.scope] ?? 3));
 }
 
 export function forgetAll(baseUrl) {
