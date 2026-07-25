@@ -10,7 +10,7 @@ import { WebSocket } from "ws";
 import QRCode from "qrcode";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites, mergeRemoteCards } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites, mergeRemoteCards, dropLegacyCardsFile } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
@@ -337,6 +337,9 @@ async function syncVaultNow() {
       (remoteBlob) => mergeVaultBlob(cfg.baseUrl, remoteBlob),
     );
     console.log("[keeper] vault synced");
+    // Cards now live only in the synced vault — once it has them, remove any legacy
+    // on-disk cards.json so nothing card-related persists locally.
+    dropLegacyCardsFile(cfg.baseUrl);
   } catch (e) {
     if (e instanceof VaultKeyMismatch) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault:", e.message);

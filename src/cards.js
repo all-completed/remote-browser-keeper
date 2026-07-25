@@ -24,7 +24,8 @@
 //   }
 import os from "node:os";
 import path from "node:path";
-import { readJson, writeJson } from "./securestore.js";
+import fs from "node:fs";
+import { readJson } from "./securestore.js";
 
 // Cards are scoped per service base URL (like history/logs), so dev test cards and
 // prod cards stay separate: ~/.remote-browser-keeper/<base-url>/cards.json
@@ -42,12 +43,28 @@ export function cardsPath(baseUrl) {
   return path.join(os.homedir(), ".remote-browser-keeper", sanitizeForPath(baseUrl), "cards.json");
 }
 
-export function loadCards(baseUrl) {
-  const v = readJson(cardsPath(baseUrl));
-  return v && typeof v === "object" ? v : {};
+// Cards are stored ONLY in the synced vault (see vault.js) — there is NO separate on-disk
+// card file. At runtime they live in this in-memory store, hydrated from the vault on each
+// sync (mergeRemoteCards) and pushed back to the vault on change (main.js). An existing
+// legacy cards.json is read once as a migration source, then removed once the vault holds
+// the cards (dropLegacyCardsFile, called after a successful sync).
+const _mem = new Map(); // baseUrl -> runtime card store { autofill?, default?, cards, _tombstones, _meta_updated_at }
+function nowIso() { return new Date().toISOString(); }
+
+function _store(baseUrl) {
+  let s = _mem.get(baseUrl);
+  if (s) return s;
+  const legacy = readJson(cardsPath(baseUrl)); // one-time migration source (securestore)
+  s = legacy && typeof legacy === "object" && (legacy.cards || legacy.autofill !== undefined || legacy._tombstones) ? legacy : {};
+  _mem.set(baseUrl, s);
+  return s;
 }
 
-function nowIso() { return new Date().toISOString(); }
+// A caller-owned copy to mutate — so saveCards can diff it against the runtime store.
+export function loadCards(baseUrl) {
+  return JSON.parse(JSON.stringify(_store(baseUrl)));
+}
+
 // Card content excluding the sync timestamp, for change detection (top-level keys sorted
 // for stability; nested `billing` order is stable in practice).
 function cardContentKey(c) {
@@ -56,13 +73,13 @@ function cardContentKey(c) {
   return JSON.stringify(rest, Object.keys(rest).sort());
 }
 
-// Persist the whole store (OS-encrypted on macOS, chmod 600). Central sync bookkeeping so
-// no mutation site has to: stamp changed/new cards with `updated_at`, record `_tombstones`
-// for deleted ones, and `_meta_updated_at` for autofill/default — this is what lets the
-// synced vault merge cards per-card (last-write-wins) across devices. See vault.js.
+// Update the runtime card store (IN MEMORY ONLY — cards persist solely in the synced
+// vault, which main.js pushes right after). Central sync bookkeeping so no mutation site
+// has to: stamp changed/new cards with `updated_at`, record `_tombstones` for deletes, and
+// `_meta_updated_at` for autofill/default — this drives the per-card vault merge (vault.js).
 export function saveCards(baseUrl, store) {
   const next = store || {};
-  const prev = loadCards(baseUrl);
+  const prev = _store(baseUrl);
   const now = nowIso();
   const prevCards = (prev && prev.cards) || {};
   const nextCards = next.cards || {};
@@ -70,7 +87,7 @@ export function saveCards(baseUrl, store) {
     const c = nextCards[id];
     if (!c || typeof c !== "object") continue;
     if (cardContentKey(c) !== cardContentKey(prevCards[id])) c.updated_at = now;        // changed/new
-    else if (!c.updated_at) c.updated_at = (prevCards[id] && prevCards[id].updated_at) || now; // migrate/keep
+    else if (!c.updated_at) c.updated_at = (prevCards[id] && prevCards[id].updated_at) || now; // keep
   }
   const tombs = { ...((prev && prev._tombstones) || {}) };
   for (const id of Object.keys(prevCards)) if (!(id in nextCards)) tombs[id] = now; // deleted → tombstone
@@ -78,23 +95,27 @@ export function saveCards(baseUrl, store) {
   next._tombstones = tombs;
   if ((prev && prev.autofill) !== next.autofill || (prev && prev.default) !== next.default) next._meta_updated_at = now;
   else if (!next._meta_updated_at) next._meta_updated_at = (prev && prev._meta_updated_at) || now;
-  writeJson(cardsPath(baseUrl), next);
+  _mem.set(baseUrl, next);
+}
+
+// Once the vault holds the cards, drop the legacy on-disk cards.json so nothing card-
+// related persists locally (migration complete). No-op if the file is already gone.
+export function dropLegacyCardsFile(baseUrl) {
+  try { fs.unlinkSync(cardsPath(baseUrl)); } catch { /* absent — fine */ }
 }
 
 // --- Synced-vault helpers (used by main.js against the vault `cards` collection) ---
 // The vault `cards` map (live cards each carrying `updated_at`, plus `{deleted,updated_at}`
-// tombstones) + `cardsMeta` ({ autofill, default, updated_at }). Self-heals migration by
-// stamping any un-timestamped cards once.
+// tombstones) + `cardsMeta` ({ autofill, default, updated_at }). Stamps any un-timestamped
+// (migrated) cards in memory.
 export function localCardCollection(baseUrl) {
-  const store = loadCards(baseUrl);
+  const store = _store(baseUrl);
   const cards = store.cards || {};
-  let dirty = false;
   const now = nowIso();
   for (const id of Object.keys(cards)) {
-    if (cards[id] && typeof cards[id] === "object" && !cards[id].updated_at) { cards[id].updated_at = now; dirty = true; }
+    if (cards[id] && typeof cards[id] === "object" && !cards[id].updated_at) cards[id].updated_at = now;
   }
-  if (!store._meta_updated_at) { store._meta_updated_at = now; dirty = true; }
-  if (dirty) writeJson(cardsPath(baseUrl), store);
+  if (!store._meta_updated_at) store._meta_updated_at = now;
   const map = {};
   for (const id of Object.keys(cards)) map[id] = cards[id];
   for (const [id, ts] of Object.entries(store._tombstones || {})) if (!(id in map)) map[id] = { deleted: true, updated_at: ts };
@@ -104,10 +125,10 @@ export function localCardCollection(baseUrl) {
   return { cards: map, cardsMeta };
 }
 
-// Merge a decrypted remote cards map + meta into the local store (per-card last-write-wins,
-// tombstones for deletes; meta by its own updated_at), persist it, and return the merged
+// Merge a decrypted remote cards map + meta into the runtime store (per-card last-write-
+// wins, tombstones for deletes; meta by its own updated_at) and return the merged
 // { cards, cardsMeta } to push back. Live cards land in store.cards; tombstones in
-// store._tombstones — so all the existing card iterators keep seeing only live cards.
+// store._tombstones — so the card iterators keep seeing only live cards. In memory only.
 export function mergeRemoteCards(baseUrl, remoteCards, remoteMeta) {
   const local = localCardCollection(baseUrl);
   const at = (e) => (e && typeof e.updated_at === "string" ? e.updated_at : "");
@@ -120,8 +141,7 @@ export function mergeRemoteCards(baseUrl, remoteCards, remoteMeta) {
   const lm = local.cardsMeta || {};
   const rm = remoteMeta || {};
   const mergedMeta = at(rm) > at(lm) ? { ...rm } : { ...lm };
-  // Write back, splitting live vs tombstones.
-  const store = loadCards(baseUrl);
+  const store = _store(baseUrl);
   const liveCards = {};
   const tombs = {};
   for (const [id, e] of Object.entries(map)) {
@@ -133,7 +153,7 @@ export function mergeRemoteCards(baseUrl, remoteCards, remoteMeta) {
   store._meta_updated_at = mergedMeta.updated_at || nowIso();
   if (mergedMeta.autofill !== undefined) store.autofill = mergedMeta.autofill;
   if (mergedMeta.default !== undefined) store.default = mergedMeta.default;
-  writeJson(cardsPath(baseUrl), store);
+  _mem.set(baseUrl, store);
   return { cards: map, cardsMeta: mergedMeta };
 }
 

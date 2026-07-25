@@ -71,7 +71,7 @@ prod Keeper keep separate stores automatically:
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
     ├── secrets.json                    # session-unlock secrets (by secret_id)
-    ├── cards.json                      # OPTIONAL saved cards for card auto-fill
+    │                                   # (no cards.json — saved cards live only in the synced vault)
     ├── fields.json                     # "forever" saved field values (this device only)
     ├── vault.json                      # "vault" saved fields — local cache of the synced vault
     ├── screenshots/
@@ -119,10 +119,17 @@ Electron `safeStorage`, `secrets.json` stays **plaintext at rest for now** — o
 file permissions protect it. **Planned:** move provisioning into the Keeper so secrets
 get the same OS encryption as cards (service repo `docs/TODO.md`).
 
-### `cards.json` — saved cards for unattended auto-fill (optional)
+### Saved cards for unattended auto-fill — stored **only in the synced vault**
 
-Per-env (like history/logs), so dev test cards and prod cards stay separate:
-`~/.remote-browser-keeper/<base-url>/cards.json`. When the service sends a `request_fill`
+> **Cards live only in the synced vault now (no local `cards.json`).** At runtime the
+> Keeper holds cards in memory, hydrated from the vault on each sync and pushed back on
+> change (see the service repo `docs/vault-format.md`, `cards` collection). An existing
+> legacy `cards.json` is migrated into the vault on first sync and then removed. Trade-off:
+> card auto-fill needs the vault to have synced (on connect), so a cold start with no
+> network has no cards until the first sync, and a card saved while offline isn't persisted
+> until it reaches the vault. Cards are per-service (dev and prod vaults are separate).
+
+When the service sends a `request_fill`
 whose fields are **all** `card-*` kinds, the Keeper auto-fills **silently — no
 prompt — only on a site the card is approved for** (per-domain permission). On any
 other site the prompt shows with a **"Use a saved card"** picker and a **"Auto-fill
