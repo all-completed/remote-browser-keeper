@@ -10,7 +10,7 @@ import { WebSocket } from "ws";
 import QRCode from "qrcode";
 import { loadConfig, keeperWsUrl } from "./config.js";
 import { createSecretStore } from "./secrets.js";
-import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites } from "./cards.js";
+import { loadCards, saveCards, autofillEnabled, isCardOnlyRequest, buildCardValues, cardOptions, mapCardToFields, hostFromUrl, findCardForDomain, approveDomain, approveAllSites, mergeRemoteCards } from "./cards.js";
 import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
@@ -302,9 +302,18 @@ async function resolveVaultKey(cfg) {
   return { repair: true }; // already v2 under an unknown password — re-pair to get it
 }
 
-// Sync the "vault"-scoped saved fields with the service: pull the remote blob, merge it
-// into the local cache (last-write-wins), and push the union back. The service only ever
-// sees opaque ciphertext (see vault.js). Best-effort — quietly no-ops without an API key.
+// Merge the decrypted remote vault blob with this device's local state: "vault"-scoped
+// saved fields AND saved cards (each merged per-entry, last-write-wins with tombstones).
+// Unknown collections are preserved so a newer client can add more without loss.
+function mergeVaultBlob(baseUrl, remoteBlob) {
+  const fields = mergeRemoteVault(baseUrl, remoteBlob.fields || {});
+  const c = mergeRemoteCards(baseUrl, remoteBlob.cards || {}, remoteBlob.cardsMeta || {});
+  return { ...remoteBlob, fields, cards: c.cards, cardsMeta: c.cardsMeta };
+}
+
+// Sync the vault (fields + cards) with the service: pull the remote blob, merge it into
+// the local caches (last-write-wins), and push the union back. The service only ever sees
+// opaque ciphertext (see vault.js). Best-effort — quietly no-ops without an API key.
 let vaultSyncing = false;
 async function syncVaultNow() {
   if (vaultSyncing) return;
@@ -325,7 +334,7 @@ async function syncVaultNow() {
     await syncVault(
       { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
       r.key,
-      (remoteFields) => mergeRemoteVault(cfg.baseUrl, remoteFields),
+      (remoteBlob) => mergeVaultBlob(cfg.baseUrl, remoteBlob),
     );
     console.log("[keeper] vault synced");
   } catch (e) {
@@ -489,7 +498,7 @@ ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {})
     if (!host) return { ok: false };
     const base = cardBaseUrl();
     const store = loadCards(base);
-    if (approveDomain(store, card_id, host)) saveCards(base, store);
+    if (approveDomain(store, card_id, host)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true, host };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -501,7 +510,7 @@ ipcMain.handle("keeper:remember-card-all-sites", (_e, { card_id } = {}) => {
   try {
     const base = cardBaseUrl();
     const store = loadCards(base);
-    if (approveAllSites(store, card_id)) saveCards(base, store);
+    if (approveAllSites(store, card_id)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -739,6 +748,7 @@ ipcMain.handle("cards:save", (_e, store) => {
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");
     saveCards(cardBaseUrl(), store);
+    void syncVaultNow(); // propagate the card add/edit/delete to other devices
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };

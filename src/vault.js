@@ -115,9 +115,22 @@ export function expectedSecretId(key, b64, format) {
   return fmt === FORMAT_V1 ? master.toString("hex") : _secretIdFromMaster(master);
 }
 
-export function emptyVault() {
-  return { schema: VAULT_SCHEMA, fields: {} };
+// The vault blob is a set of independent collections, each a map of entries merged by
+// per-entry last-write-wins (see mergeEntries). `fields` = saved field values;
+// `cards` = saved payment cards (desktop-only feature; mobile preserves them untouched);
+// `cardsMeta` = small card settings ({ autofill, default, updated_at }). Unknown keys are
+// preserved so a newer client can add collections without older clients dropping them.
+export function normalizeBlob(b) {
+  const o = b && typeof b === "object" ? b : {};
+  return { ...o, schema: VAULT_SCHEMA, fields: o.fields || {}, cards: o.cards || {}, cardsMeta: o.cardsMeta || {} };
 }
+export function emptyVault() {
+  return normalizeBlob({});
+}
+
+// Per-entry last-write-wins merge (higher updated_at wins; tie → remote). Alias of the
+// field merge, reused for the cards collection.
+export const mergeEntries = mergeFieldMaps;
 
 // Per-entry last-write-wins merge. Each value is a live { value, auto, updated_at } or a
 // tombstone { deleted: true, updated_at }. Higher updated_at wins; a tie resolves to
@@ -162,7 +175,7 @@ export async function pullVault({ baseUrl, apiKey }, key, { fetchImpl = fetch } 
 // Push `data` at `baseVersion`. On the service's optimistic-concurrency 409 returns
 // { conflict: true, current } so the caller can re-pull, re-merge and retry.
 export async function putVault({ baseUrl, apiKey }, key, data, baseVersion, { fetchImpl = fetch } = {}) {
-  const enc = encryptVault(key, { schema: VAULT_SCHEMA, fields: (data && data.fields) || {} });
+  const enc = encryptVault(key, normalizeBlob(data));
   const body = { ciphertext: enc.ciphertext, secret_id: enc.secret_id, format: enc.format, base_version: Number(baseVersion) || 0 };
   const res = await fetchImpl(apiUrl(baseUrl), {
     method: "PUT",
@@ -179,21 +192,21 @@ export async function putVault({ baseUrl, apiKey }, key, data, baseVersion, { fe
   return { ok: true, version: out?.metadata?.version };
 }
 
-// Pull → mutate(remoteFields) → push at the pulled version, retrying on 409 by
-// re-pulling and re-applying. `mutate` receives the decrypted remote field map and
-// returns the field map to store (an idempotent merge, so re-applying is safe).
-// Returns the final field map that was pushed.
-export async function syncVault(cfg, key, mutate, { fetchImpl = fetch, retries = 5 } = {}) {
+// Pull → mergeBlob(remoteBlob) → push at the pulled version, retrying on 409 by
+// re-pulling and re-applying. `mergeBlob` receives the decrypted remote blob (all
+// collections) and returns the blob to store (an idempotent merge, so re-applying after
+// a conflict is safe). Returns the final blob that was pushed.
+export async function syncVault(cfg, key, mergeBlob, { fetchImpl = fetch, retries = 5 } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const { version, data, format } = await pullVault(cfg, key, { fetchImpl });
-    const remoteFields = (data && data.fields) || {};
-    const nextFields = mutate({ ...remoteFields }) || {};
+    const remoteBlob = normalizeBlob(data);
+    const nextBlob = normalizeBlob(await mergeBlob(remoteBlob));
     // Skip a no-op write ONLY when the stored format already matches our key's format —
-    // otherwise a re-key (password change) with unchanged fields would never be pushed.
-    if (version > 0 && format === key.format && stableStringify(nextFields) === stableStringify(remoteFields)) return nextFields;
-    const res = await putVault(cfg, key, { schema: VAULT_SCHEMA, fields: nextFields }, version, { fetchImpl });
+    // otherwise a re-key (password change) with unchanged data would never be pushed.
+    if (version > 0 && format === key.format && stableStringify(nextBlob) === stableStringify(remoteBlob)) return nextBlob;
+    const res = await putVault(cfg, key, nextBlob, version, { fetchImpl });
     if (res.conflict) continue;
-    return nextFields;
+    return nextBlob;
   }
   throw new Error("vault sync failed after repeated version conflicts");
 }
@@ -210,8 +223,12 @@ export function decryptLegacyV1(sessionSecret, b64) {
   return _decryptBody(_masterSha256(sessionSecret), buf);
 }
 
-// Order-independent JSON for the no-op comparison above.
+// Deep, order-independent JSON for the no-op comparison above (the blob nests per-entry
+// maps whose key order isn't significant).
 function stableStringify(obj) {
-  if (!obj || typeof obj !== "object") return JSON.stringify(obj);
-  return JSON.stringify(Object.keys(obj).sort().map((k) => [k, obj[k]]));
+  if (Array.isArray(obj)) return "[" + obj.map(stableStringify).join(",") + "]";
+  if (obj && typeof obj === "object") {
+    return "{" + Object.keys(obj).sort().map((k) => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",") + "}";
+  }
+  return JSON.stringify(obj);
 }

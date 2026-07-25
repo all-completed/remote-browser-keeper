@@ -78,15 +78,41 @@ test("pull rejects a blob written under a different password (→ re-pair)", asy
   );
 });
 
-test("syncVault: two devices sharing one key converge, stale writer retries on 409", async () => {
+test("syncVault: two devices sharing one key converge (fields), version bumps once each", async () => {
   const svc = fakeService();
   const cfg = { baseUrl: "http://x", apiKey: "k" };
   const key = generateVaultKey(); // shared vault key
-  await syncVault(cfg, key, (r) => ({ ...r, a: { value: "A", updated_at: "2026-01-01T00:00:00Z" } }), { fetchImpl: svc.fetchImpl });
-  const out = await syncVault(cfg, key, (r) => ({ ...r, b: { value: "B", updated_at: "2026-01-02T00:00:00Z" } }), { fetchImpl: svc.fetchImpl });
-  assert.equal(out.a.value, "A");
-  assert.equal(out.b.value, "B");
+  await syncVault(cfg, key, (b) => ({ ...b, fields: { ...b.fields, a: { value: "A", updated_at: "2026-01-01T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
+  const out = await syncVault(cfg, key, (b) => ({ ...b, fields: { ...b.fields, b: { value: "B", updated_at: "2026-01-02T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
+  assert.equal(out.fields.a.value, "A");
+  assert.equal(out.fields.b.value, "B");
   assert.equal(svc.peek().version, 2);
+});
+
+test("cards live in the vault blob and merge per-card across devices", async () => {
+  const svc = fakeService();
+  const cfg = { baseUrl: "http://x", apiKey: "k" };
+  const key = generateVaultKey();
+  // Device A adds a Visa; device B (pulling A's first) adds an Amex → both survive.
+  await syncVault(cfg, key, (b) => ({ ...b, cards: { ...b.cards, visa: { number: "4111", updated_at: "2026-01-01T00:00:00Z" } }, cardsMeta: { default: "visa", updated_at: "2026-01-01T00:00:00Z" } }), { fetchImpl: svc.fetchImpl });
+  const out = await syncVault(cfg, key, (b) => ({ ...b, cards: { ...b.cards, amex: { number: "3400", updated_at: "2026-01-02T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
+  assert.equal(out.cards.visa.number, "4111");
+  assert.equal(out.cards.amex.number, "3400");
+  assert.equal(out.cardsMeta.default, "visa"); // meta preserved
+  // stored blob really carries both cards (server holds only ciphertext, but our key reads it)
+  const stored = decryptVault(key, svc.peek().ciphertext, svc.peek().format);
+  assert.deepEqual(Object.keys(stored.cards).sort(), ["amex", "visa"]);
+});
+
+test("a fields-only client preserves the cards collection (mobile behavior)", async () => {
+  const svc = fakeService();
+  const cfg = { baseUrl: "http://x", apiKey: "k" };
+  const key = generateVaultKey();
+  await syncVault(cfg, key, (b) => ({ ...b, cards: { visa: { number: "4111", updated_at: "2026-01-01T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
+  // A client that only knows fields must NOT drop cards when it pushes.
+  const out = await syncVault(cfg, key, (b) => ({ ...b, fields: { ...b.fields, x: { value: "X", updated_at: "2026-01-03T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
+  assert.equal(out.cards.visa.number, "4111"); // survived
+  assert.equal(out.fields.x.value, "X");
 });
 
 test("migration: a legacy v1 blob (keyed by the session secret) still decrypts", () => {
