@@ -64,7 +64,7 @@ export default function PromptApp() {
         // when a vault key is held — generate is already defaulted above. The user can
         // still switch to on-device or Don't save in the prompt.
         if (!hasGen) {
-          try { const s = await window.keeper.vaultStatus?.(); if (!cancelled && s && s.ok && s.hasKey) setSaveScope("vault"); } catch { /* ignore */ }
+          try { const s = await window.keeper.vaultStatus?.(); if (!cancelled && s && s.ok && s.hasKey) { setSaveScope("vault"); setDontAsk(true); } } catch { /* ignore */ }
         }
         return;
       }
