@@ -15,4 +15,7 @@ contextBridge.exposeInMainWorld("keeper", {
   // Saved field values (passwords etc.) kept on this machine, never sent to the AI.
   savedValues: (request_id) => ipcRenderer.invoke("keeper:saved-values", { request_id }),
   saveFields: (request_id, values, scope, auto) => ipcRenderer.invoke("keeper:save-fields", { request_id, values, scope, auto }),
+  // Whether a synced vault key is held (so the prompt can default a generated password
+  // to "Save to vault" rather than on-device-only).
+  vaultStatus: () => ipcRenderer.invoke("keeper:vault-status"),
 });

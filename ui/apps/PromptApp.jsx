@@ -47,8 +47,12 @@ export default function PromptApp() {
     }
     if (hasGen) {
       setValues((m) => ({ ...m, ...genInit }));
-      setSaveScope("forever");
       setDontAsk(true);
+      // A generated password is never shown to the user, so it should be backed up and
+      // available on their other devices: default to the synced vault when a vault key is
+      // held, otherwise on-device ("forever").
+      setSaveScope("forever");
+      window.keeper.vaultStatus?.().then((s) => { if (s && s.ok && s.hasKey) setSaveScope("vault"); }).catch(() => {});
     }
     let cancelled = false;
     (async () => {
