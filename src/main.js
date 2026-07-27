@@ -927,6 +927,17 @@ function createTray() {
   updateTray();
 }
 
+// Exclude EVERY Keeper window from screen capture: screenshots, screen recording, screen
+// sharing, and window-content/thumbnail readers (macOS AltTab, Mission Control previews)
+// see the window as blank. Keeps secrets on screen — entered passwords, revealed values,
+// card numbers, the pair QR (which carries the token + vault password) — from leaking to
+// other apps. setContentProtection maps to NSWindowSharingNone (macOS) / SetWindowDisplay-
+// Affinity (Windows); no-op on Linux. Registered once so it applies to current + future
+// windows. (Trade-off: the user's own screenshots/screen-shares of the Keeper are blank too.)
+app.on("browser-window-created", (_e, win) => {
+  try { win.setContentProtection(true); } catch { /* ignore where unsupported */ }
+});
+
 // ---------- App lifecycle (tray-only; no window until a request) ----------
 app.whenReady().then(() => {
   if (app.dock) app.dock.hide(); // no dock icon; live in the tray/menu bar
