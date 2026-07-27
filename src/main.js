@@ -15,6 +15,7 @@ import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
+import { generateValue } from "./genpassword.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -196,6 +197,7 @@ function connect() {
       if (pending.has(msg.request_id)) return; // dedup: server replays pending on reconnect
       msg._requested_at = new Date().toISOString();
       if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
+      if (tryAutofillGenerate(msg)) return; // generate-only request → create + fill, no prompt
       if (tryAutofillFields(msg)) return; // every field saved with "don't ask again"
       pending.set(msg.request_id, msg);
       queue.push(msg.request_id);
@@ -814,6 +816,36 @@ ipcMain.on("keeper:resize", (e, height) => {
 });
 // Silent fill when EVERY field of the request has a saved value marked "don't ask
 // again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
+// Unattended password generation: when EVERY field of a request is a `generate` field,
+// the Keeper creates each value itself (genpassword.js policy), fills them, and saves them
+// — no prompt. The generated password is never shown to the user, so it's saved to the
+// synced vault by default (falling back to on-device if no vault key) with auto-fill on,
+// so it's backed up / available on other devices and refillable. To have the user enter a
+// password manually instead, the agent sends a normal (non-generate) request_fill, which
+// prompts as usual. Mixed requests (some generate, some not) also fall through to the
+// prompt (with the generated fields prefilled).
+function tryAutofillGenerate(req) {
+  const fields = Array.isArray(req.fields) ? req.fields : [];
+  if (!fields.length || !fields.every((f) => f && f.generate)) return false;
+  let baseUrl;
+  try { baseUrl = loadConfig().baseUrl; } catch { return false; }
+  const host = hostFromUrl(req.url || "");
+  let vaultKey = null;
+  try { vaultKey = loadVaultKey(baseUrl); } catch { /* ignore */ }
+  const scope = vaultKey ? "vault" : "forever";
+  const values = [];
+  for (const f of fields) {
+    const value = generateValue(f);
+    values.push({ selector: f.selector, value });
+    if (host) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true); // auto-fill next time
+  }
+  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  if (scope === "vault" && host) void syncVaultNow();
+  recordHistory(req, "autofilled");
+  console.log("[keeper] generated + filled " + fields.length + " value(s) (" + scope + ") for session " + (req.session_id || "?"));
+  return true;
+}
+
 function tryAutofillFields(req) {
   const fields = Array.isArray(req.fields) ? req.fields : [];
   if (!fields.length) return false;

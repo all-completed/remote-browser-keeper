@@ -155,18 +155,36 @@ export function describeField(field) {
 // Apply card grouping / numeric / max-length as the user types (selects pass through).
 // Generate a strong value in the Keeper (never produced by the agent). Honors a
 // numeric format and an optional length; defaults to 20 chars of an unambiguous set.
+// Generate a strong value (mirrors src/genpassword.js policy). Passwords are length >= 14
+// with at least one a-z, A-Z, and 0-9 guaranteed; symbols included unless field.symbols
+// === false. Numeric fields are digits-only at the requested length (no 14 minimum).
+const _LOWER = "abcdefghijklmnopqrstuvwxyz";
+const _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const _DIGITS = "0123456789";
+const _SYMBOLS = "!@#$%^&*-_=+";
+function _randInt(n) {
+  const a = new Uint32Array(1);
+  const limit = Math.floor(0xffffffff / n) * n;
+  do { (globalThis.crypto || window.crypto).getRandomValues(a); } while (a[0] >= limit);
+  return a[0] % n;
+}
+const _pick = (s) => s[_randInt(s.length)];
 export function generatePassword(field) {
   const f = field || {};
   const numeric = ["numeric", "digits", "number"].includes(String(f.format || "").toLowerCase());
-  const charset = numeric
-    ? "0123456789"
-    : "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*-_=+";
-  const len = Number.isInteger(f.length) && f.length > 0 ? Math.min(f.length, 64) : 20;
-  const arr = new Uint32Array(len);
-  (globalThis.crypto || window.crypto).getRandomValues(arr);
-  let out = "";
-  for (let i = 0; i < len; i++) out += charset[arr[i] % charset.length];
-  return out;
+  if (numeric) {
+    const len = Math.max(1, Math.min(Number.isInteger(f.length) && f.length > 0 ? f.length : 6, 64));
+    let out = "";
+    for (let i = 0; i < len; i++) out += _pick(_DIGITS);
+    return out;
+  }
+  const pools = [_LOWER, _UPPER, _DIGITS, ...(f.symbols !== false ? [_SYMBOLS] : [])];
+  const all = pools.join("");
+  const len = Math.max(14, Math.min(Number.isInteger(f.length) && f.length > 0 ? f.length : 20, 128));
+  const chars = pools.map(_pick);
+  while (chars.length < len) chars.push(_pick(all));
+  for (let i = chars.length - 1; i > 0; i--) { const j = _randInt(i + 1); [chars[i], chars[j]] = [chars[j], chars[i]]; }
+  return chars.join("");
 }
 
 export function transformValue(field, raw) {
