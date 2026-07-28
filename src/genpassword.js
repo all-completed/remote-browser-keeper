@@ -30,9 +30,31 @@ function shuffle(a) {
   return a;
 }
 
+export function isNumericField(field) {
+  return ["numeric", "digits", "number"].includes(String((field || {}).format || "").toLowerCase());
+}
+
+// One value per KIND within a single request. A sign-up form has "Password" AND
+// "Confirm password", and the agent is told to send BOTH selectors in ONE
+// request_fill — if each field generated its own value the confirmation could
+// never match and every submission would be rejected. So all non-numeric
+// generate fields in a request share one password, and all numeric ones share
+// one code (covers "PIN" + "confirm PIN"). Params come from the first field of
+// each kind. A caller wanting two DIFFERENT secrets sends two separate requests.
+export function generateSharedValues(fields) {
+  const out = new Map();
+  const perKind = new Map();
+  for (const f of (fields || [])) {
+    const kind = isNumericField(f) ? "numeric" : "text";
+    if (!perKind.has(kind)) perKind.set(kind, generateValue(f));
+    out.set(f.selector, perKind.get(kind));
+  }
+  return out;
+}
+
 export function generateValue(field) {
   const f = field || {};
-  const numeric = ["numeric", "digits", "number"].includes(String(f.format || "").toLowerCase());
+  const numeric = isNumericField(f);
   if (numeric) {
     const len = Math.max(1, Math.min(Number.isInteger(f.length) && f.length > 0 ? f.length : 6, 64));
     let out = "";

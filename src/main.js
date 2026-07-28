@@ -15,7 +15,7 @@ import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
-import { generateValue } from "./genpassword.js";
+import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -873,17 +873,44 @@ function tryAutofillGenerate(req) {
   let vaultKey = null;
   try { vaultKey = loadVaultKey(baseUrl); } catch { /* ignore */ }
   const scope = vaultKey ? "vault" : "forever";
+  // Shared per kind so "Password" + "Confirm password" in one request match.
+  const shared = generateSharedValues(fields);
   const values = [];
   for (const f of fields) {
-    const value = generateValue(f);
+    const value = shared.get(f.selector);
     values.push({ selector: f.selector, value });
     if (host) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true); // auto-fill next time
   }
   safeSend({ type: "fill_response", request_id: req.request_id, values });
   if (scope === "vault" && host) void syncVaultNow();
   recordHistory(req, "autofilled");
-  console.log("[keeper] generated + filled " + fields.length + " value(s) (" + scope + ") for session " + (req.session_id || "?"));
+  logGenerated(req, fields, shared, host, scope);
   return true;
+}
+
+// What was generated, for the Keeper's own log. Details (selector, length,
+// charset, where it was saved) are always logged; the VALUE is not.
+//
+// Writing a freshly generated password into a log file would undo the point of a
+// password manager — logs get tailed, copied into bug reports, and backed up. So
+// the plaintext is opt-in per run: launch with KEEPER_LOG_PASSWORDS=1 when you
+// deliberately want to read a generated password off the console. To see one
+// WITHOUT that, use "Saved fields…" in the tray and click reveal.
+const LOG_PASSWORDS = process.env.KEEPER_LOG_PASSWORDS === "1";
+function logGenerated(req, fields, shared, host, scope) {
+  const distinct = new Set(shared.values()).size;
+  console.log(
+    "[keeper] generated " + distinct + " value(s) for " + fields.length + " field(s)"
+    + " (" + scope + ") host=" + (host || "?") + " session=" + (req.session_id || "?")
+    + (distinct === 1 && fields.length > 1 ? " [shared — password + confirmation]" : ""),
+  );
+  for (const f of fields) {
+    const value = shared.get(f.selector) || "";
+    const shape = (isNumericField(f) ? "digits" : "a-zA-Z0-9"
+      + (f.symbols === false ? "" : "+symbols")) + " len=" + value.length;
+    console.log("[keeper]   " + (f.selector || "?") + " -> " + shape
+      + (LOG_PASSWORDS ? " value=" + value : " (set KEEPER_LOG_PASSWORDS=1 to log the value)"));
+  }
 }
 
 function tryAutofillFields(req) {

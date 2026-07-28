@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { shortUrl, submitVal, transformValue, generatePassword } from "../lib/format.js";
+import { shortUrl, submitVal, transformValue, generateSharedPasswords } from "../lib/format.js";
 import { getLatest, subscribe } from "../lib/promptBridge.js";
 import FieldRow from "../components/FieldRow.jsx";
 import CardPicker from "../components/CardPicker.jsx";
@@ -40,11 +40,10 @@ export default function PromptApp() {
     if (!req) return;
     const reqFields = Array.isArray(req.fields) ? req.fields : [];
     // Generate a fresh strong value for any generate-field, and default to saving it.
-    const genInit = {};
-    let hasGen = false;
-    for (const f of reqFields) {
-      if (f && f.generate) { genInit[f.selector] = generatePassword(f); hasGen = true; }
-    }
+    // Shared per kind, so a "Confirm password" field gets the SAME value as the
+    // password it confirms (otherwise the form rejects every submission).
+    const genInit = generateSharedPasswords(reqFields);
+    const hasGen = Object.keys(genInit).length > 0;
     if (hasGen) {
       setValues((m) => ({ ...m, ...genInit }));
       setDontAsk(true);
@@ -159,7 +158,9 @@ export default function PromptApp() {
               field={f}
               value={values[f.selector] || ""}
               onChange={(raw) => setValue(f, raw)}
-              onGenerate={(field) => setValues((m) => ({ ...m, [field.selector]: generatePassword(field) }))}
+              // Regenerate the whole group, not just this row: a password and its
+              // confirmation must stay identical or the form rejects the submit.
+              onGenerate={() => setValues((m) => ({ ...m, ...generateSharedPasswords(fields) }))}
               onSubmit={send}
               onCancel={cancel}
             />

@@ -169,6 +169,23 @@ function _randInt(n) {
   return a[0] % n;
 }
 const _pick = (s) => s[_randInt(s.length)];
+
+// One value per KIND across a request, so "Password" + "Confirm password" match.
+// Mirrors src/genpassword.js generateSharedValues — see the reasoning there.
+// Returns { [selector]: value } covering only the request's `generate` fields.
+export function generateSharedPasswords(fields) {
+  const out = {};
+  const perKind = {};
+  for (const f of (fields || [])) {
+    if (!f || !f.generate) continue;
+    const kind = ["numeric", "digits", "number"].includes(String(f.format || "").toLowerCase())
+      ? "numeric" : "text";
+    if (!(kind in perKind)) perKind[kind] = generatePassword(f);
+    out[f.selector] = perKind[kind];
+  }
+  return out;
+}
+
 export function generatePassword(field) {
   const f = field || {};
   const numeric = ["numeric", "digits", "number"].includes(String(f.format || "").toLowerCase());
