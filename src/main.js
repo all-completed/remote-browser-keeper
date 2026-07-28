@@ -16,6 +16,7 @@ import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as for
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
 import { generateValue } from "./genpassword.js";
+import { loadSettings, saveSettings } from "./settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -696,6 +697,42 @@ function openVaultPwWindow() {
   vaultPwWin.once("ready-to-show", () => { vaultPwWin.show(); vaultPwWin.focus(); });
   vaultPwWin.on("closed", () => { vaultPwWin = null; });
 }
+
+let settingsWin = null;
+function openSettingsWindow() {
+  if (settingsWin) { settingsWin.show(); settingsWin.focus(); return; }
+  settingsWin = new BrowserWindow({
+    width: 420,
+    height: 340,
+    resizable: false,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Settings",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "settings-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  settingsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  settingsWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  settingsWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(settingsWin, "settings");
+  settingsWin.once("ready-to-show", () => { settingsWin.show(); settingsWin.focus(); });
+  settingsWin.on("closed", () => { settingsWin = null; });
+}
+// Per-device Keeper preferences (see settings.js). Non-secret; local-only.
+ipcMain.handle("keeper:get-settings", () => {
+  try { return { ok: true, settings: loadSettings(loadConfig().baseUrl) }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle("keeper:set-settings", (_e, patch = {}) => {
+  try { return { ok: true, settings: saveSettings(loadConfig().baseUrl, patch) }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
 // Encode the connection config into a QR image. The token lives only inside the
 // returned image — it is never sent to the renderer as text.
 ipcMain.handle("pair:qr", async () => {
@@ -829,6 +866,9 @@ function tryAutofillGenerate(req) {
   if (!fields.length || !fields.every((f) => f && f.generate)) return false;
   let baseUrl;
   try { baseUrl = loadConfig().baseUrl; } catch { return false; }
+  // Opt-out: when the user turned on "show the password window", generation isn't silent —
+  // fall through to the prompt so they can review/edit the generated value before it fills.
+  try { if (loadSettings(baseUrl).generateShowWindow) return false; } catch { /* default: unattended */ }
   const host = hostFromUrl(req.url || "");
   let vaultKey = null;
   try { vaultKey = loadVaultKey(baseUrl); } catch { /* ignore */ }
@@ -941,6 +981,7 @@ function updateTray() {
     { type: "separator" },
     { label: "Pair phone…", click: openPairWindow },
     { label: "Set vault password…", click: openVaultPwWindow },
+    { label: "Settings…", click: openSettingsWindow },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
