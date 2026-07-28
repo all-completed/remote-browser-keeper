@@ -106,3 +106,31 @@ body {
 }
 .confirm-msg { font-size: 12.5px; color: var(--text); flex: 1; min-width: 180px; }
 .confirm-actions { display: flex; gap: 8px; margin-left: auto; }
+
+/* ---- Click-to-filter chips + active-filter bar -----------------------------
+   Session/host chips double as filters: click narrows the list, clicking the
+   active one clears it. Filtering is entirely in the renderer over data already
+   in memory — no IPC, no refetch. */
+.chip-filter {
+  cursor: pointer;
+  font: inherit;
+  border: 1px solid transparent;
+}
+.chip-filter:hover { border-color: var(--accent, #3b6cf0); }
+.chip.active {
+  border: 1px solid var(--accent, #3b6cf0);
+  background: rgba(59, 108, 240, 0.16);
+  color: var(--accent, #3b6cf0);
+}
+.chip.clear { cursor: pointer; font: inherit; }
+.chip.time { opacity: 0.75; }
+.filterbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--muted2, #8b95ad);
+  margin: 2px 0 10px;
+}
+.filterbar .count { margin-left: auto; }

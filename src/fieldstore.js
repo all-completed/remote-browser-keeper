@@ -76,7 +76,9 @@ export function getSaved(baseUrl, session, host, selector) {
 export function saveValue(baseUrl, session, host, selector, value, scope, auto) {
   if (!host || !selector) return;
   const k = keyOf(session, host, selector);
-  const entry = { value, auto: !!auto };
+  // Timestamp every scope (not just vault): the Saved-fields list shows
+  // "3d ago" per entry, and without this only vault rows would have a date.
+  const entry = { value, auto: !!auto, updated_at: nowIso() };
   if (scope === "session") {
     memory.set(k, entry);
     // ensure it isn't also persisted under the old scope
@@ -135,17 +137,17 @@ export function listSaved(baseUrl) {
   // (whitespace-different keys, or a key present in both memory and persisted). A
   // persisted "forever" entry wins over an in-memory "session" one.
   const byKey = new Map();
-  const add = (k, scope, auto) => {
+  const add = (k, scope, auto, updated_at) => {
     const p = parseKey(k);
     if (!p) return;
     const norm = `${p.session.trim()}|${p.host}|${p.selector.trim()}`;
-    if (scope === "forever" || !byKey.has(norm)) byKey.set(norm, { ...p, scope, auto });
+    if (scope === "forever" || !byKey.has(norm)) byKey.set(norm, { ...p, scope, auto, updated_at });
   };
-  for (const [k, e] of memory.entries()) add(k, "session", !!unwrap(e).auto);
+  for (const [k, e] of memory.entries()) add(k, "session", !!unwrap(e).auto, unwrap(e).updated_at);
   const persisted = loadPersisted(baseUrl);
-  for (const k of Object.keys(persisted)) add(k, "forever", !!unwrap(persisted[k]).auto);
+  for (const k of Object.keys(persisted)) add(k, "forever", !!unwrap(persisted[k]).auto, unwrap(persisted[k]).updated_at);
   const vaultFields = loadVaultFields(baseUrl);
-  for (const k of Object.keys(vaultFields)) if (isLive(vaultFields[k])) add(k, "vault", !!vaultFields[k].auto);
+  for (const k of Object.keys(vaultFields)) if (isLive(vaultFields[k])) add(k, "vault", !!vaultFields[k].auto, vaultFields[k].updated_at);
   // Show synced "vault" fields first (they're the cross-device ones people look for),
   // then on-device "forever", then in-memory "session".
   const rank = { vault: 0, forever: 1, session: 2 };

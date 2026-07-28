@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { relTime, absTime } from "../lib/format.js";
 
 // Management window: lists field values the user saved on this machine and lets
 // them forget any (or all). Only metadata is shown — the value itself is encrypted
@@ -8,6 +9,14 @@ export default function SavedFieldsApp() {
   const [loaded, setLoaded] = useState(false);
   const [confirm, setConfirm] = useState(null); // { type: "all" } | { type: "one", entry }
   const [shown, setShown] = useState({}); // entryKey -> revealed value (in-memory only)
+  // Click a host/session chip to narrow the list — local to this window, no refetch.
+  const [filter, setFilter] = useState({ session: null, host: null });
+  const onFilter = (key, value) => setFilter((f) => ({ ...f, [key]: value }));
+  const activeFilter = filter.session !== null || filter.host !== null;
+  const visible = items.filter((e) => (
+    (filter.session === null || (e.session || "") === filter.session)
+    && (filter.host === null || e.host === filter.host)
+  ));
 
   const keyOf = (e) => (e.session || "") + "|" + e.host + "|" + e.selector;
   // Reveal (or hide) a single saved value on demand — useful for reading a generated
@@ -76,11 +85,22 @@ export default function SavedFieldsApp() {
           </div>
         )}
 
+        {activeFilter && (
+          <div className="filterbar">
+            <span>Filtered by</span>
+            {filter.host !== null && <span className="chip active">{filter.host}</span>}
+            {filter.session !== null && <span className="chip active">session: {filter.session || "—"}</span>}
+            <button type="button" className="chip clear" onClick={() => setFilter({ session: null, host: null })}>Clear</button>
+            <span className="count">{visible.length} of {items.length}</span>
+          </div>
+        )}
         {loaded && items.length === 0 ? (
           <p id="empty">No saved fields.</p>
+        ) : visible.length === 0 ? (
+          <p id="empty">No saved fields match this filter.</p>
         ) : (
           <div id="list">
-            {items.map((e, i) => (
+            {visible.map((e, i) => (
               <div className="entry" key={(e.session || "") + "|" + e.host + "|" + e.selector + "|" + i}>
                 <div className="top">
                   <span className={"badge " + (e.scope === "warn-never" ? "warn" : e.scope === "session" ? "warn" : "ok")}>
@@ -93,8 +113,21 @@ export default function SavedFieldsApp() {
                   <button type="button" className="sf-btn" onClick={() => setConfirm({ type: "one", entry: e })}>Forget</button>
                 </div>
                 <div className="meta">
-                  <span className="chip url" title={e.host}>{e.host}</span>
-                  <span className="chip">session: {e.session || "—"}</span>
+                  <button
+                    type="button"
+                    className={"chip url chip-filter" + (filter.host === e.host ? " active" : "")}
+                    title={filter.host === e.host ? "Clear this filter" : `Show only ${e.host}`}
+                    onClick={() => onFilter("host", filter.host === e.host ? null : e.host)}
+                  >{e.host}</button>
+                  <button
+                    type="button"
+                    className={"chip chip-filter" + (filter.session === (e.session || "") ? " active" : "")}
+                    title={filter.session === (e.session || "") ? "Clear this filter" : `Show only session ${e.session || "—"}`}
+                    onClick={() => onFilter("session", filter.session === (e.session || "") ? null : (e.session || ""))}
+                  >session: {e.session || "—"}</button>
+                  {e.updated_at && (
+                    <span className="chip time" title={absTime(e.updated_at)}>{relTime(e.updated_at)}</span>
+                  )}
                 </div>
                 <div className="fields">
                   <span className="k">selector: </span>

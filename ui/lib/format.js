@@ -230,3 +230,36 @@ export function plainFormat(format) {
   }
   return { pattern: format, hint: `format: ${format}` };
 }
+
+// ---- Relative timestamps -----------------------------------------------------
+// Lists are scanned, not read: "2w ago" answers "is this recent?" at a glance,
+// while a full timestamp has to be decoded. The exact value still matters
+// sometimes, so callers pair this with absTime() in a title/tooltip rather than
+// replacing it. Accepts ISO strings, Dates, epoch seconds or millis.
+const _SECONDS_CUTOFF = 1e11;
+export function toDate(ts) {
+  if (ts == null || ts === "") return null;
+  if (ts instanceof Date) return isNaN(ts.getTime()) ? null : ts;
+  if (typeof ts === "number") return new Date(ts < _SECONDS_CUTOFF ? ts * 1000 : ts);
+  const n = Number(ts);
+  if (!Number.isNaN(n) && String(ts).trim() !== "") return new Date(n < _SECONDS_CUTOFF ? n * 1000 : n);
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? null : d;
+}
+const _UNITS = [["y", 365 * 24 * 3600], ["mo", 30 * 24 * 3600], ["w", 7 * 24 * 3600],
+                ["d", 24 * 3600], ["h", 3600], ["m", 60]];
+export function relTime(ts, now = Date.now()) {
+  const d = toDate(ts);
+  if (!d) return "";
+  const diff = (now - d.getTime()) / 1000;
+  const future = diff < 0, abs = Math.abs(diff);
+  if (abs < 45) return future ? "in a moment" : "just now";
+  for (const [suffix, secs] of _UNITS) {
+    if (abs >= secs) { const n = Math.floor(abs / secs); return future ? `in ${n}${suffix}` : `${n}${suffix} ago`; }
+  }
+  return future ? "in a moment" : "just now";
+}
+export function absTime(ts) {
+  const d = toDate(ts);
+  return d ? d.toLocaleString() : "";
+}

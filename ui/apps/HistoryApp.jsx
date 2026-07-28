@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { shortUrl } from "../lib/format.js";
+import { shortUrl, relTime } from "../lib/format.js";
 import { getLatest, subscribe } from "../lib/historyBridge.js";
 
 function fmtTime(ts) {
@@ -8,7 +8,11 @@ function fmtTime(ts) {
   return isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
 }
 
-function HistoryEntry({ it }) {
+function hostOf(u) {
+  try { return new URL(u).host; } catch { return ""; }
+}
+
+function HistoryEntry({ it, filter, onFilter }) {
   const [shown, setShown] = useState(false);
   const [data, setData] = useState(null);
   const [unavailable, setUnavailable] = useState(false);
@@ -32,13 +36,27 @@ function HistoryEntry({ it }) {
       <div className="top">
         <span className={"badge " + (outcome === "submitted" || outcome === "autofilled" ? "ok" : "no")}>{outcome}</span>
         <span className="time" title={`requested: ${fmtTime(it.requested_at)}\nresolved: ${fmtTime(it.resolved_at)}`}>
-          {fmtTime(it.resolved_at || it.requested_at)}
+          {relTime(it.resolved_at || it.requested_at)}
         </span>
       </div>
       {(it.session_id || it.url) && (
         <div className="meta">
-          {it.session_id && <span className="chip">session: {it.session_id}</span>}
-          {it.url && <span className="chip url" title={it.url}>{shortUrl(it.url)}</span>}
+          {it.session_id && (
+            <button
+              type="button"
+              className={"chip chip-filter" + (filter.session === it.session_id ? " active" : "")}
+              title={filter.session === it.session_id ? "Clear this filter" : `Show only session ${it.session_id}`}
+              onClick={() => onFilter("session", filter.session === it.session_id ? null : it.session_id)}
+            >session: {it.session_id}</button>
+          )}
+          {it.url && (
+            <button
+              type="button"
+              className={"chip url chip-filter" + (filter.host === hostOf(it.url) ? " active" : "")}
+              title={filter.host === hostOf(it.url) ? "Clear this filter" : `Show only ${hostOf(it.url)}`}
+              onClick={() => onFilter("host", filter.host === hostOf(it.url) ? null : hostOf(it.url))}
+            >{shortUrl(it.url)}</button>
+          )}
         </div>
       )}
       {names.length > 0 && (
@@ -71,6 +89,15 @@ export default function HistoryApp() {
   const [items, setItems] = useState(getLatest());
   useEffect(() => subscribe(setItems), []);
   const list = Array.isArray(items) ? items : [];
+  // Click a session/host chip to narrow the list. Purely local to this window —
+  // no refetch, the history is already in memory.
+  const [filter, setFilter] = useState({ session: null, host: null });
+  const onFilter = (key, value) => setFilter((f) => ({ ...f, [key]: value }));
+  const active = filter.session || filter.host;
+  const shown = list.filter((it) => (
+    (!filter.session || it.session_id === filter.session)
+    && (!filter.host || hostOf(it.url) === filter.host)
+  ));
 
   return (
     <>
@@ -83,10 +110,25 @@ export default function HistoryApp() {
             <button id="refresh" type="button" onClick={() => window.keeperHistory.refresh()}>Refresh</button>
           </div>
         </header>
+        {active && (
+          <div className="filterbar">
+            <span>Filtered by</span>
+            {filter.session && <span className="chip active">session: {filter.session}</span>}
+            {filter.host && <span className="chip active">{filter.host}</span>}
+            <button type="button" className="chip clear" onClick={() => setFilter({ session: null, host: null })}>Clear</button>
+            <span className="count">{shown.length} of {list.length}</span>
+          </div>
+        )}
         {list.length === 0 ? (
           <p id="empty">No requests yet.</p>
+        ) : shown.length === 0 ? (
+          <p id="empty">No requests match this filter.</p>
         ) : (
-          <div id="list">{list.map((it, i) => <HistoryEntry key={it.request_id || i} it={it} />)}</div>
+          <div id="list">
+            {shown.map((it, i) => (
+              <HistoryEntry key={it.request_id || i} it={it} filter={filter} onFilter={onFilter} />
+            ))}
+          </div>
         )}
       </main>
     </>
