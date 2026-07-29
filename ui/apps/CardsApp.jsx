@@ -12,10 +12,13 @@ function yearOpts(selected) {
   if (selected && !ys.includes(String(selected))) ys.unshift(String(selected));
   return ys;
 }
-// A plain hostname: dot-separated labels (a-z0-9, inner hyphens), TLD of 2+ letters.
-// Rejects globs (*.pge.com), spaces, schemes, and other junk.
+// A hostname (dot-separated labels, TLD of 2+ letters), optionally with a
+// wildcard: "*" alone = every site, "*.pge.com" = pge.com + all subdomains.
+// Still rejects spaces, schemes, mid-label globs (foo.*.com) and other junk.
 function isValidDomain(d) {
-  return /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(d);
+  if (d === "*") return true;
+  const bare = d.startsWith("*.") ? d.slice(2) : d;
+  return /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(bare);
 }
 function normalizeDomains(text) {
   return String(text || "")
@@ -190,8 +193,8 @@ export default function CardsApp() {
             </Field>
             <label className="check"><input type="checkbox" checked={store.default === currentId} onChange={(e) => setDefault(e.target.checked)} /><span>Use this card by default</span></label>
             <Field label="Auto-fill on these sites — one per line or comma-separated (silent, no prompt)"
-              hint="A domain also covers its subdomains (pge.com → account.pge.com). No wildcards.">
-              <textarea rows={2} placeholder={"amazon.com\nshop.example.com"} value={domainsText}
+              hint="A domain also covers its subdomains (pge.com → account.pge.com). Wildcards ok: * = every site, *.amazon.com = amazon.com + subdomains.">
+              <textarea rows={2} placeholder={"amazon.com\n*.example.com\n*"} value={domainsText}
                 onChange={(e) => { setDomainsText(e.target.value); patchCard({ domains: parseDomains(e.target.value) }); }} />
               {invalidDomains(domainsText).length > 0 && (
                 <p className="warn" style={{ marginTop: 4 }}>

@@ -187,7 +187,9 @@ export function hostFromUrl(url) {
 }
 function domainMatches(approved, host) {
   if (approved === "*") return true; // "*" = approved for all sites
-  const a = String(approved || "").toLowerCase().replace(/^www\./, "");
+  // "*.amazon.com" covers the apex + every subdomain — the same reach a plain
+  // "amazon.com" entry already has; the wildcard form just says it explicitly.
+  const a = String(approved || "").toLowerCase().replace(/^\*\./, "").replace(/^www\./, "");
   return !!a && !!host && (host === a || host.endsWith("." + a));
 }
 // The card approved to auto-fill on `host`, or null. (default card preferred.)
