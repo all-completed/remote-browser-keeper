@@ -140,6 +140,10 @@ Full layout — source tree, windows/IPC, and the on-disk data store — is in
 - `src/main.js` — main process: tray, keeper WS client (reconnect), prompt /
   history / image windows, IPC, and per-URL history storage
 - `src/config.js` — base URL + API key resolution
+- `src/historyapi.js` + `src/historymerge.js` — the service's copy of the request
+  history, and its union with the local log: **History…** shows one list, each row
+  tagged *local only* / *server only* / *both*
+  ([details](docs/file-structure.md#request-history--one-list-from-two))
 - `src/*-preload.cjs` — `contextBridge` bridges for the prompt / history / image windows
 - `renderer/{prompt,history,image}.*` — the window UIs
 - `~/.remote-browser-keeper/<base-url>/` — history (`history.jsonl`) + proof

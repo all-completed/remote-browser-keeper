@@ -34,6 +34,8 @@ remote-browser-keeper/
 | --- | --- |
 | `main.js` | The whole main process: tray-only lifecycle (dock hidden), the **Keeper WebSocket client** (connect/reconnect, `hello`/`ping`/`pong`, receive `fill_request`, send `fill_response`), the **prompt-window queue**, the **History window**, the **full-size image viewer**, the **tray menu** (service host + connection state, History…, Quit), and **local history + screenshot storage** (see below). |
 | `config.js` | Resolves `{ baseUrl, apiKey }` — `RBS_URL` / default `https://rb.example.com`, and the API key from `AC_API_KEY` / `RBS_API_KEY` / `AC_API_KEY_FILE` / `~/.ac-api-key`. Also derives `keeperWsUrl`. |
+| `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
+| `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
 | `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel`, `viewImage`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
@@ -50,7 +52,7 @@ to the main process only through their preload bridge.
 | Files | Window |
 | --- | --- |
 | `prompt.{html,css,js}` | The **fill prompt**: one proof screenshot (tap to enlarge), session/url chips, the agent's message, and one masked input per field (reveal toggle, `length` cap, `format` constraint). Send / Cancel. |
-| `history.{html,css,js}` | The **History** window: list of past requests (status, session, url, fields, time) with a *View screenshot* toggle. |
+| `history.{html,css,js}` | The **History** window: past requests (status, provenance, session, url, fields, time) with a *View screenshot* toggle. One list merged from this device's log **and** the service's — see [Request history — one list from two](#request-history--one-list-from-two). |
 | `image.{html,js}` | The **full-size screenshot viewer** (opened from the prompt or History; the window fits the image's natural size). |
 
 ### Windows & IPC
@@ -60,6 +62,10 @@ The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
 preload bridge (e.g. `keeper:request`, `history:data`, `image:data`) and back via
 IPC (`keeper:submit`, `history:screenshot`, `keeper:view-image`). The typed value
 travels renderer → main → WebSocket only; it is never written to disk or logged.
+
+`history:data` carries `{ items, server }` — the merged rows plus
+`server: { state: "loading" | "ok" | "error", … }` — and main pushes it **twice** per
+refresh: the local log at once, then the union when the service's list settles.
 
 ## Runtime data (on your machine)
 
@@ -84,12 +90,59 @@ prod Keeper keep separate stores automatically:
   replaced (`https://rb.dev.example.com` → `rb.dev.example.com`).
 - **`history.jsonl`** — one JSON object per line, **never containing values**:
   `request_id`, `session_id`, `url`, `requested_at`, `resolved_at`,
-  `outcome` (`submitted` | `cancelled` | `autofilled`), a `screenshot` path, and
-  per-field metadata (`selector`, `label`, `field`, `length`, `format`). Eviction
-  runs on every write: keep the most recent **2000** entries and drop anything
-  older than **~6 months**.
+  `outcome` (`submitted` | `cancelled` | `autofilled` | `ui_failed`), a `screenshot`
+  path, and per-field metadata (`selector`, `label`, `field`, `length`, `format`).
+  Eviction runs on every write: keep the most recent **2000** entries and drop
+  anything older than **~6 months**. Eviction no longer *hides* a request: an evicted
+  entry the service still knows about comes back in the History window as
+  **server only** (next section).
 - **`screenshots/<request_id>.jpg`** — the same proof image the prompt showed.
   Evicted together with its history entry (orphans are reconciled on each write).
+  The service keeps its own copy, so *View screenshot* still works afterwards.
+
+## Request history — one list from two
+
+There are **two** histories of the same requests, and either can hold one the other
+never saw:
+
+| | this device — `history.jsonl` | the service — `GET /api/sessions/fill-history` |
+| --- | --- | --- |
+| written when | the prompt is answered here (`recordHistory`) | the request reaches a terminal state (`server/keeper.py` `_finish`) |
+| calls the outcome | `outcome`: `submitted` \| `cancelled` \| `autofilled` \| `ui_failed` | `status`: `pending` \| `filled` \| `cancelled` \| `timeout` \| `no_keeper` \| `error` |
+| times | ISO strings | epoch seconds |
+| **only here** | an **offline submit** (history is written before the send, and the send no-ops on a closed socket); **`ui_failed`**, which reaches the service only as a generic `cancelled` | **`no_keeper`** and **`timeout`** (nothing was ever answered here); anything a **different paired device** answered — the service fans a `fill_request` out to *every* connected keeper, and the ones that lose the race only get a dismissal, which records nothing |
+
+The History window shows the **union**, so "not in the list" means "it did not happen
+on this account" rather than "this laptop didn't see it". Both sides key on the same
+server-minted `request_id`, so a request is matched, never duplicated.
+
+**Precedence** (implemented in `src/historymerge.js`, pinned by `test/history.test.mjs`):
+
+1. **Provenance** — each row is tagged **local only** / **server only** / **both**,
+   derived *only* from which list(s) the `request_id` was found in. Never inferred
+   from a status. While the service's list is unavailable the tag reads just **local**:
+   the request may well exist there too, we simply couldn't ask.
+2. **Status** — the service's `status` is authoritative for *what happened to the
+   request* (it alone sees the fill succeed or error, the expiry, another device
+   answering); the local `outcome` is authoritative for *what this device did*.
+   **Neither overwrites the other.** When they disagree the row shows **both**,
+   labelled by source (`local: ui_failed` · `server: cancelled`). `submitted`/`autofilled`
+   ↔ `filled` and `cancelled` ↔ `cancelled` are the same event and collapse to one badge;
+   everything else — including `ui_failed` vs `cancelled` — is shown as a disagreement,
+   because the local word is the more specific one and exists nowhere else.
+3. **Time** — the service's clock orders any request it knows about; local-only rows
+   necessarily use the local clock.
+4. **Screenshots** — *View screenshot* asks main, which reads the local JPEG first and
+   falls back to the service's proof (`/fill-history/{request_id}/screenshot`). A row
+   whose image lives only on the other side still shows it; the button appears only when
+   at least one side reports having one.
+5. **Degradation** — the window paints the local log immediately and repaints when the
+   service's list lands, so it never blocks on the network. No key / offline / HTTP error
+   ⇒ local-only **with the reason shown in the window**; the list is never emptied, and
+   the 8 s timeout means it can never hang.
+
+The API key stays in the main process: the History window is sandboxed under a
+`default-src 'self'` CSP and does no networking of its own.
 
 ## Sensitive data — secrets & cards
 

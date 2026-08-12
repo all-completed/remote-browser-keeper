@@ -17,6 +17,8 @@ import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVault
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
 import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
+import { mergeHistory } from "./historymerge.js";
+import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -674,22 +676,46 @@ function openHistoryWindow() {
   historyWin.webContents.on("will-redirect", (e) => e.preventDefault());
   loadWindow(historyWin, "history");
   historyWin.once("ready-to-show", () => {
-    historyWin.webContents.send("history:data", readHistory());
+    void sendHistory();
     historyWin.show();
     historyWin.focus();
   });
   historyWin.on("closed", () => { historyWin = null; });
 }
 
-ipcMain.on("history:refresh", () => {
-  if (historyWin) historyWin.webContents.send("history:data", readHistory());
-});
-ipcMain.handle("history:screenshot", (_e, id) => {
+function pushHistory(payload) {
+  if (historyWin && !historyWin.isDestroyed()) historyWin.webContents.send("history:data", payload);
+}
+
+// Paint the local log at once, then repaint with the union as soon as the service's
+// list lands (or fails). The window therefore never waits on the network: offline it
+// just stays local-only, with the reason shown. A newer refresh cancels an older one's
+// second paint so a slow response can't overwrite a fresher list.
+let historySeq = 0;
+async function sendHistory() {
+  const seq = ++historySeq;
+  pushHistory({ items: mergeHistory(readHistory(), []), server: { state: "loading" } });
+  let r;
+  try { r = await fetchServerHistory(loadConfig()); }
+  catch (e) { r = { ok: false, requests: [], error: e.message }; } // loadConfig threw
+  if (seq !== historySeq || !historyWin) return;
+  pushHistory({
+    items: mergeHistory(readHistory(), r.requests),
+    server: r.ok ? { state: "ok", count: r.requests.length } : { state: "error", error: r.error },
+  });
+}
+
+ipcMain.on("history:refresh", () => { void sendHistory(); });
+// The proof image, from wherever it survives: this device's JPEG first (no network),
+// else the service's copy — a request answered on another device, or one whose local
+// file was evicted, still shows its screenshot. null = neither side has it.
+ipcMain.handle("history:screenshot", async (_e, id) => {
   const sid = safeId(id);
   if (!sid) return null;
   try {
     return "data:image/jpeg;base64," + fs.readFileSync(screenshotFile(sid)).toString("base64");
-  } catch { return null; }
+  } catch { /* not on this device — the service may still hold the proof */ }
+  try { return await fetchServerScreenshot(loadConfig(), sid); } catch { return null; }
 });
 
 // ---------- Cards window (manage saved cards for auto-fill) ----------
