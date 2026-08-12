@@ -290,15 +290,16 @@ Two rules the rasters have to keep holding:
 
 `src/assets/tray.svg` is also **the same drawing** as the Android status-bar icon in
 [all-completed/remote-browser-mobile](https://github.com/all-completed/remote-browser-mobile)
-(`drawable/ic_stat_keeper.xml`): same 24×24 viewBox, same path data, same stroke
-widths. One glyph, rendered twice — black-on-transparent here, white-on-transparent
-there. **Mobile's `branding/glyph-shield-keeper.svg` is the canonical drawing** —
-retouch it there, then copy the `d` strings and stroke widths back into `tray.svg`
-and regenerate the two PNGs.
+(`drawable/ic_stat_keeper.xml`): same 24×24 viewBox, same path data. One glyph,
+rendered twice — black-on-transparent here, white-on-transparent there. **Mobile's
+`branding/glyph-shield-keeper.svg` is the canonical drawing** — retouch it there,
+then copy the `d` string back into `tray.svg` and regenerate the two PNGs.
 
-The keyhole ring (r2.4 at stroke-width 1.7) is deliberately that size: it leaves a
-~2 px hole once rasterised to 16 px. A tighter ring makes the hole sub-pixel and it
-reads as a smudge rather than a keyhole on a 1x menu bar.
+The glyph is a **solid** shield with the keyhole punched out by an even-odd fill.
+An outlined version shipped briefly (issue #5) and was rejected on sight: at 16 px
+the shield edge and the keyhole ring are two thin concentric strokes that fight each
+other, whereas the silhouette reads instantly. The mass is the mark — don't
+re-outline it.
 
 ## Related
 

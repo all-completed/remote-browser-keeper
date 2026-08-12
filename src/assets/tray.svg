@@ -1,26 +1,20 @@
 <svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-  <!-- Menu-bar tray glyph: an outlined shield with an outlined keyhole (the Keeper mark).
-       Line art, not a silhouette — at menu-bar size a solid fill reads as an undifferentiated
-       lump. Black on transparent so macOS renders it as a template image (white on the dark
-       menu bar, black in light mode); the stroke colour is discarded, only alpha survives.
+  <!-- Menu-bar tray glyph: a solid shield with the keyhole cut out (even-odd fill).
+       Black on transparent so macOS renders it as a template image (white on the dark
+       menu bar, black in light mode); the fill colour is discarded, only alpha survives.
 
-       The 24x24 viewBox and both path strings are copied VERBATIM from the canonical glyph in
-       remote-browser-mobile (`branding/glyph-shield-keeper.svg`, shipped on Android as
+       Solid, not line art. An outlined version shipped briefly and was rejected on sight
+       at menu-bar size: the two thin concentric strokes (shield edge + keyhole ring)
+       fight each other in 16 px, while the silhouette reads instantly. See issue #5.
+
+       The 24x24 viewBox and the path string are copied VERBATIM from the canonical glyph
+       in remote-browser-mobile (`branding/glyph-shield-keeper.svg`, shipped on Android as
        `drawable/ic_stat_keeper.xml`) — one glyph, rendered twice. Mobile is the source of
-       truth: retouch it there first, then copy the `d` strings and stroke widths back here.
-
-       The keyhole ring is r2.4 at stroke-width 1.7, which leaves a ~2 px hole at 16 px. An
-       earlier r1.9 / sw2 ring made the hole sub-pixel and it read as a smudge on a 1x menu
-       bar — do not shrink the ring or fatten its stroke.
+       truth: retouch it there first, then copy the `d` string back here.
 
        trayTemplate.png / trayTemplate@2x.png are generated FROM THIS FILE and are what
        actually ships (see docs/file-structure.md § Icons). Regenerate them on every edit. -->
-  <g fill="none" stroke="#000" stroke-linejoin="round" stroke-linecap="round">
-    <!-- shield outline -->
-    <path stroke-width="2"
-          d="M12,2.6 L19.4,5.4 V11.2 C19.4,15.7 16.3,19.3 12,20.7 C7.7,19.3 4.6,15.7 4.6,11.2 V5.4 Z"/>
-    <!-- keyhole: ring + stem -->
-    <path stroke-width="1.7"
-          d="M9.6,9.3 A2.4,2.4 0 0,1 14.4,9.3 A2.4,2.4 0 0,1 9.6,9.3 Z M12,11.7 V15.6"/>
-  </g>
+  <path fill="#000" fill-rule="evenodd" d="
+    M12 1.35 L21 4.5 V12 C21 18 12 22.65 12 22.65 C12 22.65 3 18 3 12 V4.5 Z
+    M12 6.9 C10.275 6.9 8.925 8.25 8.925 9.9 C8.925 11.025 9.525 12 10.425 12.6 L9.525 16.65 H14.475 L13.575 12.6 C14.475 12 15.075 11.025 15.075 9.9 C15.075 8.25 13.725 6.9 12 6.9 Z"/>
 </svg>
