@@ -5,6 +5,11 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("keeper", {
   onRequest: (cb) => ipcRenderer.on("keeper:request", (_e, req) => cb(req)),
+  // Pull the request to draw instead of only waiting to be handed one, and report back
+  // once it is painted. Main keeps the window hidden until that report arrives, so a
+  // window can never be on screen with nothing in it (issue #3).
+  pendingRequest: () => ipcRenderer.invoke("keeper:pending-request"),
+  rendered: (request_id) => ipcRenderer.send("keeper:prompt-rendered", { request_id }),
   submit: (request_id, values) => ipcRenderer.send("keeper:submit", { request_id, values }),
   cancel: (request_id) => ipcRenderer.send("keeper:cancel", { request_id }),
   cardValues: (request_id, card_id) => ipcRenderer.invoke("keeper:card-values", { request_id, card_id }),

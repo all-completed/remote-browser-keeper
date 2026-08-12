@@ -76,9 +76,17 @@ Keeper → server:
 ```json
 { "type": "fill_response", "request_id": "uuid", "value": "..." }
 { "type": "fill_response", "request_id": "uuid", "cancelled": true }
+{ "type": "fill_response", "request_id": "uuid", "cancelled": true,
+  "error": "keeper_ui_failed", "reason": "content loaded but never painted" }
 { "type": "hello", "app": "remote-browser-keeper", "version": "0.1.0" }
 { "type": "pong" }
 ```
+
+`error: "keeper_ui_failed"` means the **approval window could not be shown** — the user was
+never asked. It is deliberately distinct from a plain cancel (the user declined) and from a
+timeout (the user was away): an automation that sees it should **stop**, not retry, since
+retrying a login prompt nobody can approve just burns attempts against a lockout policy.
+Older services that don't know the field still see a well-formed `cancelled` response.
 Server → keeper (liveness): `{ "type": "ping" }`.
 
 The agent calls `request_fill` (returns a `request_id`, status `pending`) and polls
@@ -104,6 +112,25 @@ npm start          # tray app; a test prompt can be forced with KEEPER_TEST=1
 
 Config: `RBS_URL` (your service base URL, e.g. `https://rb.example.com`),
 `AC_API_KEY` / `~/.ac-api-key`.
+
+### If an approval window doesn't appear
+
+The prompt window is kept hidden until its renderer reports the request is painted, so a
+window that can't render is reported instead of shown blank:
+
+- the menu-bar icon shows **⚠︎** and the tray menu names the failure (click it to dismiss);
+- the log line is `[keeper] approval window failed to render: <cause>` (run `npm start`
+  from a terminal, or `open -a "Remote Browser Keeper"` from one, to see it);
+- the request is answered with `error: "keeper_ui_failed"` instead of being left hanging,
+  and it appears in **History…** with the outcome `ui_failed`;
+- requests still waiting for you are listed in the tray menu under **Waiting for you**.
+
+Two diagnostic switches, both off by default:
+
+| Env | Effect |
+| --- | --- |
+| `KEEPER_RENDER_TIMEOUT_MS` | How long a prompt may take to appear before it is declared failed (default 15000). |
+| `KEEPER_NO_CONTENT_PROTECTION=1` | Disables the screen-capture exclusion for one run, to rule it in or out as the cause of a window that won't paint. **Security trade-off: Keeper windows become capturable while it is set** — diagnosis only, never a normal way to run. |
 
 ## Files
 
