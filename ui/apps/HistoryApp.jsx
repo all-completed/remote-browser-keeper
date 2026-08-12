@@ -12,13 +12,37 @@ function hostOf(u) {
   try { return new URL(u).host; } catch { return ""; }
 }
 
-function HistoryEntry({ it, filter, onFilter }) {
+// Colour for a status word from EITHER vocabulary — local outcomes
+// (submitted/cancelled/autofilled/ui_failed) and server statuses
+// (pending/filled/cancelled/timeout/no_keeper/error) share one scale.
+const OK = new Set(["submitted", "autofilled", "filled"]);
+const WARN = new Set(["pending", "timeout", "no_keeper"]);
+const badgeClass = (v) => (OK.has(v) ? "ok" : WARN.has(v) ? "warn" : "no");
+
+// Where the record is known from. Derived purely from which list(s) it was found in
+// (see src/historymerge.js) — never guessed from a status. While the server list is
+// missing we can only claim "local", not "local only": the request may well be on the
+// server too, we just couldn't ask.
+function provenance(source, serverKnown) {
+  if (source === "both") return { label: "both", title: "Recorded on this device and by the service" };
+  if (source === "server") return { label: "server only", title: "The service has this request; this device has no record of it (answered on another device, or never delivered here)" };
+  if (serverKnown) return { label: "local only", title: "This device has this request; the service's list does not" };
+  return { label: "local", title: "From this device's log. The service's list could not be loaded, so this request may exist there too." };
+}
+
+function HistoryEntry({ it, filter, onFilter, serverKnown }) {
   const [shown, setShown] = useState(false);
   const [data, setData] = useState(null);
   const [unavailable, setUnavailable] = useState(false);
-  const outcome = it.outcome || "unknown";
   const fields = Array.isArray(it.fields) ? it.fields : [];
   const names = fields.map((f) => f.label || f.field || f.selector || "field");
+  const prov = provenance(it.source, serverKnown);
+  // When the two sides disagree on the same request_id, both are shown, labelled —
+  // picking one would hide either what the service did or what this device did.
+  const badges = it.disagree
+    ? [{ src: "local", v: it.outcome }, { src: "server", v: it.status }]
+    : [{ src: null, v: it.effective || "unknown" }];
+  const hasShot = it.local_screenshot || it.server_screenshot;
 
   const toggle = async () => {
     if (shown) { setShown(false); return; }
@@ -34,7 +58,12 @@ function HistoryEntry({ it, filter, onFilter }) {
   return (
     <div className="entry">
       <div className="top">
-        <span className={"badge " + (outcome === "submitted" || outcome === "autofilled" ? "ok" : "no")}>{outcome}</span>
+        {badges.map(({ src, v }) => (
+          <span key={src || "only"} className={"badge " + badgeClass(v)}>
+            {src ? <span className="badge-src">{src}: </span> : null}{v}
+          </span>
+        ))}
+        <span className={"chip source " + it.source} title={prov.title}>{prov.label}</span>
         <span className="time" title={`requested: ${fmtTime(it.requested_at)}\nresolved: ${fmtTime(it.resolved_at)}`}>
           {relTime(it.resolved_at || it.requested_at)}
         </span>
@@ -65,7 +94,7 @@ function HistoryEntry({ it, filter, onFilter }) {
           {names.join(", ")}
         </div>
       )}
-      {it.screenshot && (
+      {hasShot && (
         <>
           <button type="button" className="shot-btn" disabled={unavailable} onClick={toggle}>
             {unavailable ? "Screenshot unavailable" : shown ? "Hide screenshot" : "View screenshot"}
@@ -86,9 +115,11 @@ function HistoryEntry({ it, filter, onFilter }) {
 }
 
 export default function HistoryApp() {
-  const [items, setItems] = useState(getLatest());
-  useEffect(() => subscribe(setItems), []);
-  const list = Array.isArray(items) ? items : [];
+  const [payload, setPayload] = useState(getLatest());
+  useEffect(() => subscribe(setPayload), []);
+  const list = Array.isArray(payload && payload.items) ? payload.items : [];
+  const server = (payload && payload.server) || { state: "loading" };
+  const serverKnown = server.state === "ok";
   // Click a session/host chip to narrow the list. Purely local to this window —
   // no refetch, the history is already in memory.
   const [filter, setFilter] = useState({ session: null, host: null });
@@ -105,11 +136,17 @@ export default function HistoryApp() {
       <main id="wrap">
         <header id="head">
           <div id="title">Request history</div>
-          <div id="sub">What was requested and when — values are never stored.</div>
+          <div id="sub">Everything on this account — this device and the service — values are never stored.</div>
           <div id="actions">
             <button id="refresh" type="button" onClick={() => window.keeperHistory.refresh()}>Refresh</button>
           </div>
         </header>
+        {server.state === "loading" && <div className="notice">Loading the service's list…</div>}
+        {server.state === "error" && (
+          <div className="notice warn">
+            The service's list is unavailable ({server.error || "unreachable"}) — showing this device's records only.
+          </div>
+        )}
         {active && (
           <div className="filterbar">
             <span>Filtered by</span>
@@ -126,7 +163,7 @@ export default function HistoryApp() {
         ) : (
           <div id="list">
             {shown.map((it, i) => (
-              <HistoryEntry key={it.request_id || i} it={it} filter={filter} onFilter={onFilter} />
+              <HistoryEntry key={it.request_id || i} it={it} filter={filter} onFilter={onFilter} serverKnown={serverKnown} />
             ))}
           </div>
         )}

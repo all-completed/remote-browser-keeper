@@ -58,7 +58,28 @@ body {
 .badge.ok { color: var(--ok); background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.30); }
 .badge.no { color: var(--no); background: rgba(248, 113, 113, 0.10); border: 1px solid rgba(248, 113, 113, 0.28); }
 .badge.warn { color: var(--warn); background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.32); }
+.badge .badge-src { opacity: 0.65; font-weight: 600; }
 .time { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+
+/* Provenance: which list(s) the request was found in — local only / server only /
+   both. Deliberately quieter than the status badge (it answers "do I have the whole
+   picture?", not "what happened?"), and "both" is the quietest: it is the norm. */
+.chip.source { font-size: 10.5px; letter-spacing: 0.2px; padding: 2px 8px; white-space: nowrap; }
+.chip.source.both { color: var(--muted2); }
+.chip.source.local { color: var(--primary-hi); border-color: rgba(96, 165, 250, 0.30); }
+.chip.source.server { color: var(--warn); border-color: rgba(251, 191, 36, 0.30); }
+
+/* Why the list may be incomplete — a missing service list has to be visible, never
+   silently indistinguishable from "nothing else happened". */
+.notice {
+  font-size: 12px; color: var(--muted); margin: 0 0 10px;
+  padding: 8px 11px; border-radius: 9px;
+  background: var(--chip-bg); border: 1px solid var(--border);
+}
+.notice.warn {
+  color: var(--warn); background: rgba(251, 191, 36, 0.08);
+  border-color: rgba(251, 191, 36, 0.30);
+}
 
 .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip {
