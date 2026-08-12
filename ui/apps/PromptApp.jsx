@@ -17,6 +17,19 @@ export default function PromptApp() {
 
   useEffect(() => subscribe(setReq), []);
 
+  // Tell main the request is actually on screen. Main shows the window only on this
+  // report and treats its absence as a render failure, so a prompt that cannot paint can
+  // never masquerade as one waiting for the user (issue #3). Two animation frames = a
+  // frame was committed; the timer is a fallback where rAF is throttled. Idempotent in main.
+  useEffect(() => {
+    if (!req) return;
+    const ack = () => { try { window.keeper.rendered?.(req.request_id); } catch { /* ignore */ } };
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(ack); });
+    const t = setTimeout(ack, 500);
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); clearTimeout(t); };
+  }, [req && req.request_id]);
+
   // Report content height to main so the window fits exactly (no empty space /
   // clipping). Re-reports as content changes (proof image loads, picker expands).
   useEffect(() => {
@@ -84,7 +97,14 @@ export default function PromptApp() {
     return () => { cancelled = true; };
   }, [req && req.request_id]);
 
-  if (!req) return <div id="glow" />;
+  // Main keeps the window hidden until a request is painted, so this state should never
+  // be on screen — but if it ever is, it must SAY so rather than look like a dead window.
+  if (!req) return (
+    <>
+      <div id="glow" />
+      <p id="waiting">Waiting for the request…</p>
+    </>
+  );
 
   const fields = Array.isArray(req.fields) ? req.fields : [];
   const hasCard = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));

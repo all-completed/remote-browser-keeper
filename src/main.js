@@ -24,6 +24,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // KEEPER_DEV=1, load from the Vite dev server instead for hot-reload.
 const KEEPER_DEV = process.env.KEEPER_DEV === "1";
 function loadWindow(win, name) {
+  // A window whose content fails to load still shows its frame, so the failure would
+  // otherwise be a silent empty box. Name it in the log for EVERY window (the prompt
+  // window additionally turns it into a user-visible failure — see failPrompt).
+  const wc = win.webContents;
+  wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame) console.error(`[keeper] ${name} window failed to load: ${code} ${desc} ${url}`);
+  });
+  wc.on("preload-error", (_e, preloadPath, err) => {
+    console.error(`[keeper] ${name} window preload error (${preloadPath}):`, (err && err.message) || err);
+  });
+  wc.on("render-process-gone", (_e, details) => {
+    console.error(`[keeper] ${name} window renderer gone:`, (details && details.reason) || "?");
+  });
   if (KEEPER_DEV) win.loadURL(`http://localhost:5173/${name}.html`);
   else win.loadFile(path.join(__dirname, "..", "renderer-dist", `${name}.html`));
 }
@@ -379,7 +392,21 @@ function tryAutofillCard(req) {
 }
 
 // ---------- Prompt window ----------
+// The prompt window is the ONLY surface a fill request can be answered from, so its
+// render is supervised (issue #3: the window opened but painted nothing, and the request
+// could never be approved). Three rules:
+//   1. the window stays hidden until the renderer confirms the request is on screen, so
+//      an empty frame is never shown;
+//   2. the payload is BOTH pushed (on did-finish-load) and pulled (keeper:pending-request),
+//      so no single missed event can leave the renderer with nothing to draw;
+//   3. if the request is not on screen within PROMPT_RENDER_TIMEOUT_MS, that is a named,
+//      visible failure and the requester is told the UI failed — never silence.
+const PROMPT_RENDER_TIMEOUT_MS = Number(process.env.KEEPER_RENDER_TIMEOUT_MS) || 15000;
+let promptState = null;        // { requestId, payload, loaded, rendered, timer } for the open prompt
+let lastPromptFailure = null;  // { requestId, reason, at } — shown in the tray until dismissed
+
 function showNextPrompt() {
+  updateTray(); // every caller has just changed the queue — keep its pending list truthful
   if (promptWin || queue.length === 0) return;
   const requestId = queue[0];
   const req = pending.get(requestId);
@@ -394,6 +421,9 @@ function showNextPrompt() {
   const winHeight = Math.min(800, 260 + Math.max(1, fields.length) * 96 + (cardOpts.length ? 72 : 0));
 
   promptWin = new BrowserWindow({
+    // Hidden until the renderer says the request is painted (keeper:prompt-rendered).
+    // Showing on creation is what turned a render failure into a blank approval window.
+    show: false,
     width: 480,
     height: winHeight,
     resizable: true,
@@ -413,6 +443,18 @@ function showNextPrompt() {
       spellcheck: false,
     },
   });
+  const win = promptWin;
+  const payload = {
+    request_id: req.request_id,
+    session_id: req.session_id,
+    url: req.url || null,           // page URL being filled
+    message: req.message || null,   // LLM's explanation of why
+    screenshot: req.screenshot || null, // single proof image for the request
+    fields,                         // [{selector,label,field,length,format}]
+    cards: cardOpts,                // [{id,isDefault}] for the saved-card picker
+    host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
+  };
+  promptState = { requestId, payload, loaded: false, rendered: false, timer: null };
   promptWin.setAlwaysOnTop(true, "screen-saver");
   // The prompt only ever shows local content. Deny any attempt to navigate away
   // or open a new window (defense-in-depth on top of the renderer CSP), so no
@@ -421,23 +463,38 @@ function showNextPrompt() {
   promptWin.webContents.on("will-navigate", (e) => e.preventDefault());
   promptWin.webContents.on("will-redirect", (e) => e.preventDefault());
   promptWin.webContents.on("will-attach-webview", (e) => e.preventDefault());
-  loadWindow(promptWin, "prompt");
-  promptWin.once("ready-to-show", () => {
-    promptWin.webContents.send("keeper:request", {
-      request_id: req.request_id,
-      session_id: req.session_id,
-      url: req.url || null,           // page URL being filled
-      message: req.message || null,   // LLM's explanation of why
-      screenshot: req.screenshot || null, // single proof image for the request
-      fields,                         // [{selector,label,field,length,format}]
-      cards: cardOpts,                // [{id,isDefault}] for the saved-card picker
-      host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
-    });
-    promptWin.show();
-    promptWin.focus();
-    try { shell.beep(); } catch { /* play the OS alert sound to announce the prompt */ }
+  // Push the payload the moment the document is loaded (the renderer also pulls it on
+  // mount — see keeper:pending-request). Not "ready-to-show": that fires on first paint,
+  // so a window that loads but never paints would get the request never at all.
+  promptWin.webContents.on("did-finish-load", () => {
+    if (!promptState || promptState.requestId !== requestId) return;
+    promptState.loaded = true;
+    try { win.webContents.send("keeper:request", payload); } catch { /* fail-prompt below */ }
   });
+  // Every way the renderer can fail to come up, named — so the cause is in the log
+  // instead of being guessed at from a blank window.
+  promptWin.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame) failPrompt(requestId, `renderer load failed (${code} ${desc}) ${url}`);
+  });
+  promptWin.webContents.on("preload-error", (_e, preloadPath, err) => {
+    failPrompt(requestId, `preload threw (${preloadPath}): ${(err && err.message) || err}`);
+  });
+  promptWin.webContents.on("render-process-gone", (_e, details) => {
+    failPrompt(requestId, `renderer process gone (${(details && details.reason) || "?"})`);
+  });
+  loadWindow(promptWin, "prompt");
+  // Nothing on screen within the deadline => the approval UI is broken, not the user
+  // being slow (the user cannot even be slow yet — the window is still hidden).
+  promptState.timer = setTimeout(() => {
+    failPrompt(requestId, promptState && promptState.loaded
+      ? "content loaded but never painted"
+      : "content never finished loading");
+  }, PROMPT_RENDER_TIMEOUT_MS);
   promptWin.on("closed", () => {
+    if (promptState && promptState.requestId === requestId) {
+      clearTimeout(promptState.timer);
+      promptState = null;
+    }
     // If closed without an explicit submit/cancel, treat as cancel.
     if (pending.has(requestId)) {
       recordHistory(pending.get(requestId), "cancelled");
@@ -445,9 +502,79 @@ function showNextPrompt() {
       pending.delete(requestId);
     }
     if (queue[0] === requestId) queue.shift();
-    promptWin = null;
+    if (promptWin === win) promptWin = null; // a later prompt may already own promptWin
     showNextPrompt();
   });
+}
+
+// The renderer confirms (after an actual paint) that the request is on screen. Only then
+// is the window shown, so the user never sees an empty approval window, and the render
+// watchdog stands down.
+ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!promptState || !win || win !== promptWin || promptState.requestId !== request_id) return;
+  if (promptState.rendered) return;
+  promptState.rendered = true;
+  clearTimeout(promptState.timer);
+  promptState.timer = null;
+  promptWin.show();
+  promptWin.focus();
+  try { shell.beep(); } catch { /* play the OS alert sound to announce the prompt */ }
+});
+// Pull side of the delivery: the prompt renderer asks for the request it must draw, so
+// it does not depend on having been listening when main pushed it.
+ipcMain.handle("keeper:pending-request", (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!promptState || !win || win !== promptWin) return null;
+  return promptState.payload;
+});
+
+// A prompt that never made it onto the screen. Name the cause, make it visible (log +
+// tray + History), and tell the service the APPROVAL UI failed — a distinct outcome from
+// "the user did not answer", so an automation can stop instead of retrying a login into
+// an account lockout.
+function failPrompt(requestId, reason) {
+  if (!promptState || promptState.requestId !== requestId || promptState.rendered) return;
+  console.error("[keeper] approval window failed to render:", reason, "— request", requestId);
+  if (CONTENT_PROTECTION) {
+    console.error("[keeper] screen-capture protection is ON for this window;"
+      + " re-run with KEEPER_NO_CONTENT_PROTECTION=1 to rule it in or out as the cause");
+  }
+  lastPromptFailure = { requestId, reason, at: new Date().toISOString() };
+  const req = pending.get(requestId);
+  if (req) {
+    recordHistory(req, "ui_failed");
+    safeSend({ type: "fill_response", request_id: requestId, cancelled: true, error: "keeper_ui_failed", reason });
+    pending.delete(requestId);
+  }
+  if (queue[0] === requestId) queue.shift();
+  const w = promptWin;
+  promptWin = null;
+  clearTimeout(promptState.timer);
+  promptState = null;
+  if (w && !w.isDestroyed()) w.destroy(); // its "closed" handler is now a no-op (nothing pending)
+  updateTray();
+  showNextPrompt();
+}
+
+// Bring a queued request to the front: the tray lists everything awaiting approval, so a
+// window that failed (or was lost behind something) never means restarting the app.
+function focusRequest(requestId) {
+  if (!pending.has(requestId)) return;
+  if (promptWin) {
+    // One prompt at a time: surface the open one, and make this request the next in line.
+    if (queue[0] !== requestId) {
+      const i = queue.indexOf(requestId);
+      if (i > 0) { queue.splice(i, 1); queue.splice(1, 0, requestId); }
+    }
+    // Never force a not-yet-painted window on screen — that is the blank window again.
+    // It appears by itself the moment it renders, or fails loudly (failPrompt).
+    if (promptState && promptState.rendered) { promptWin.show(); promptWin.focus(); }
+    return;
+  }
+  const i = queue.indexOf(requestId);
+  if (i > 0) { queue.splice(i, 1); queue.unshift(requestId); }
+  showNextPrompt();
 }
 
 function resolveRequest(requestId, payload) {
@@ -991,17 +1118,39 @@ function serviceHost() {
   try { return new URL(loadConfig().baseUrl).host; } catch { return loadConfig().baseUrl; }
 }
 
+// Requests awaiting the user, straight in the tray menu: a second way to reach a pending
+// approval that doesn't depend on the prompt window being on screen (or having rendered).
+function pendingMenuItems() {
+  const items = [];
+  for (const id of queue) {
+    const req = pending.get(id);
+    if (!req) continue;
+    const where = hostFromUrl(req.url || "") || req.session_id || "request";
+    items.push({ label: `Approve: ${where}`, click: () => focusRequest(id) });
+  }
+  if (!items.length) return [];
+  return [{ label: `Waiting for you (${items.length})`, enabled: false }, ...items, { type: "separator" }];
+}
+
 function updateTray() {
   if (!tray) return;
   const host = serviceHost();
   const state = connected ? "connected" : "reconnecting…";
   tray.setToolTip(`Remote Browser Keeper — ${state} · ${host}`);
+  // A render failure is announced in the menu bar itself, since the surface that would
+  // normally tell the user (the prompt window) is the thing that just failed.
+  if (process.platform === "darwin") tray.setTitle(lastPromptFailure ? "⚠︎" : trayFallbackTitle);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `Service: ${host}`, enabled: false },
     // Use colored emoji dots: a plain "●" inherits the (gray) disabled-item text
     // color, so it always looks gray. 🟢/🟡 render in color regardless of state.
     { label: connected ? "🟢 Connected" : "🟡 Reconnecting…", enabled: false },
     { type: "separator" },
+    ...(lastPromptFailure ? [{
+      label: `⚠︎ Approval window failed to render (${lastPromptFailure.reason}) — click to dismiss`,
+      click: () => { lastPromptFailure = null; updateTray(); },
+    }, { type: "separator" }] : []),
+    ...pendingMenuItems(),
     { label: "Cards…", click: openCardsWindow },
     { label: "Saved fields…", click: openSavedFieldsWindow },
     { label: "History…", click: openHistoryWindow },
@@ -1015,6 +1164,7 @@ function updateTray() {
   ]));
 }
 
+let trayFallbackTitle = ""; // "🔑" only when the icon asset failed to load
 function createTray() {
   // A monochrome template image (black + alpha) — macOS renders it white on the dark
   // menu bar and dark in light mode, matching the system icons. @2x is picked up
@@ -1023,7 +1173,7 @@ function createTray() {
   icon.setTemplateImage(true);
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   // Fall back to the text glyph only if the image failed to load.
-  if (process.platform === "darwin" && icon.isEmpty()) tray.setTitle("🔑");
+  if (icon.isEmpty()) trayFallbackTitle = "🔑";
   updateTray();
 }
 
@@ -1034,7 +1184,18 @@ function createTray() {
 // other apps. setContentProtection maps to NSWindowSharingNone (macOS) / SetWindowDisplay-
 // Affinity (Windows); no-op on Linux. Registered once so it applies to current + future
 // windows. (Trade-off: the user's own screenshots/screen-shares of the Keeper are blank too.)
+//
+// KEEPER_NO_CONTENT_PROTECTION=1 turns it OFF for one run. It exists ONLY to rule content
+// protection in or out when a window won't paint (issue #3): the protection is on by
+// default and dropping it is a security regression, so this is a diagnostic switch, not a
+// supported mode — it is loud in the log while it is in effect.
+const CONTENT_PROTECTION = process.env.KEEPER_NO_CONTENT_PROTECTION !== "1";
 app.on("browser-window-created", (_e, win) => {
+  if (!CONTENT_PROTECTION) {
+    console.warn("[keeper] SECURITY: KEEPER_NO_CONTENT_PROTECTION=1 — this window IS capturable"
+      + " by screenshots/screen sharing; diagnostic use only");
+    return;
+  }
   try { win.setContentProtection(true); } catch { /* ignore where unsupported */ }
 });
 
