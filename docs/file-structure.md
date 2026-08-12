@@ -256,6 +256,44 @@ Each job uploads a `remote-browser-keeper-<platform>` artifact. The build runs o
 every branch push and via **workflow_dispatch**. Locally: `npm run dist` (current
 OS). electron-builder config lives in `package.json` under `build`.
 
+### Icons
+
+Two SVGs are the source of truth; **everything else in these two directories is
+derived and must be regenerated whenever its SVG changes** — a stale raster is what
+actually ships.
+
+| Source | Derived (committed) | Used by |
+| --- | --- | --- |
+| `src/assets/tray.svg` | `trayTemplate.png` (16×16), `trayTemplate@2x.png` (32×32) | `createTray()` in `main.js` — loaded by name, `@2x` picked up automatically |
+| `build/icon.svg` | `icon.png` (1024×1024), `icon.icns`, `icon.ico` | electron-builder (`package.json` → `build.mac/win/linux.icon`) |
+
+```sh
+# tray template — rasterise at exactly 16 and 32 px, black-on-transparent
+rsvg-convert -w 16 -h 16 src/assets/tray.svg -o src/assets/trayTemplate.png
+rsvg-convert -w 32 -h 32 src/assets/tray.svg -o 'src/assets/trayTemplate@2x.png'
+
+# app icon — one 2048 px master, then area-average down to each size
+rsvg-convert -w 2048 -h 2048 build/icon.svg -o /tmp/icon-master.png
+sips -Z 1024 /tmp/icon-master.png --out build/icon.png
+#   .icns: iconutil -c icns from an .iconset of 16/32/64/128/256/512/1024
+#   .ico : the 16/24/32/48/64/128/256 sizes in one file
+```
+
+Two rules the rasters have to keep holding:
+
+- **`trayTemplate*.png` stay black-on-transparent.** `setTemplateImage(true)` makes
+  macOS discard the colour and use the alpha as a mask, tinting it for the current
+  menu bar; a white PNG would be invisible in light mode.
+- **Downscale the app icon with an area average, not a sharpening filter.** Lanczos
+  overshoots at the white-on-blue edges and lays a light halo around the mark —
+  re-introducing exactly the faked depth `icon.svg` was flattened to remove.
+
+`src/assets/tray.svg` is also **the same drawing** as the Android status-bar icon in
+[all-completed/remote-browser-mobile](https://github.com/all-completed/remote-browser-mobile)
+(`drawable/ic_stat_keeper.xml`): same 24×24 viewBox, same path data, same stroke
+width. One glyph, rendered twice — black-on-transparent here, white-on-transparent
+there. Retouch one, retouch both.
+
 ## Related
 
 - Wire protocol + field `length`/`format`: documented in the project README.

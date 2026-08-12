@@ -1,20 +1,18 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <!-- Remote Browser Keeper icon: a gold key-in-shield inside a browser window,
-       on a royal-blue gradient. A guardian delivering secrets into a remote browser. -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2F7DFF"/>
-      <stop offset="1" stop-color="#0A1F4D"/>
-    </linearGradient>
-    <linearGradient id="gold" x1="392" y1="406" x2="632" y2="702" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FCE9A6"/>
-      <stop offset="0.5" stop-color="#F4C656"/>
-      <stop offset="1" stop-color="#DB9E2C"/>
-    </linearGradient>
-  </defs>
+  <!-- Remote Browser Keeper icon: a gold key-in-shield inside a browser window, on royal
+       blue. A guardian delivering secrets into a remote browser.
 
+       FLAT: solid colours only — no gradients, no simulated shadow, no faked volume. macOS
+       and Windows apply their own material/depth treatment; the artwork must not fake its
+       own. Each solid below is taken from the gradient it replaced (background = the midpoint
+       of the old #2F7DFF→#0A1F4D ramp; gold = the middle stop of the old three-stop ramp),
+       so the flat icon still reads as the same mark.
+
+       icon.icns / icon.ico / icon.png are generated FROM THIS FILE and are what electron-
+       builder ships (see package.json "build"). Regenerate all three on every edit —
+       docs/file-structure.md § Icons. -->
   <!-- background -->
-  <rect x="0" y="0" width="1024" height="1024" rx="208" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="208" fill="#1D4EA6"/>
 
   <!-- browser window (white outline) -->
   <g fill="none" stroke="#F4F7FF" stroke-width="17" stroke-linejoin="round">
@@ -27,7 +25,7 @@
     <circle cx="372" cy="333" r="9.5"/>
   </g>
 
-  <!-- shield (gold outline; blue shows through) -->
+  <!-- shield (gold outline; the background shows through) -->
   <path d="M392 430
            C392 414 404 406 418 406
            L606 406
@@ -35,14 +33,15 @@
            L632 560
            C632 644 578 682 512 706
            C446 682 392 644 392 560 Z"
-        fill="none" stroke="url(#gold)" stroke-width="24" stroke-linejoin="round"/>
+        fill="none" stroke="#F4C656" stroke-width="24" stroke-linejoin="round"/>
 
   <!-- key (gold) -->
-  <g fill="url(#gold)">
+  <g fill="#F4C656">
     <path d="M499 540 h26 v86 h-26 z"/>
     <rect x="525" y="588" width="22" height="15"/>
     <rect x="525" y="611" width="15" height="13"/>
   </g>
-  <circle cx="512" cy="503" r="45" fill="url(#gold)"/>
-  <circle cx="512" cy="503" r="18" fill="#13317A"/>
+  <circle cx="512" cy="503" r="45" fill="#F4C656"/>
+  <!-- the hole in the key's bow: the background punched through, not a third shade -->
+  <circle cx="512" cy="503" r="18" fill="#1D4EA6"/>
 </svg>
