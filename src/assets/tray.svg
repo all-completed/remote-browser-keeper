@@ -4,16 +4,23 @@
        lump. Black on transparent so macOS renders it as a template image (white on the dark
        menu bar, black in light mode); the stroke colour is discarded, only alpha survives.
 
-       The 24x24 viewBox and both path strings are THE SAME DRAWING as the Android status-bar
-       icon (remote-browser-mobile `drawable/ic_stat_keeper.xml`) — one glyph, rendered twice.
-       If either side is retouched, retouch both.
+       The 24x24 viewBox and both path strings are copied VERBATIM from the canonical glyph in
+       remote-browser-mobile (`branding/glyph-shield-keeper.svg`, shipped on Android as
+       `drawable/ic_stat_keeper.xml`) — one glyph, rendered twice. Mobile is the source of
+       truth: retouch it there first, then copy the `d` strings and stroke widths back here.
+
+       The keyhole ring is r2.4 at stroke-width 1.7, which leaves a ~2 px hole at 16 px. An
+       earlier r1.9 / sw2 ring made the hole sub-pixel and it read as a smudge on a 1x menu
+       bar — do not shrink the ring or fatten its stroke.
 
        trayTemplate.png / trayTemplate@2x.png are generated FROM THIS FILE and are what
        actually ships (see docs/file-structure.md § Icons). Regenerate them on every edit. -->
-  <g fill="none" stroke="#000" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+  <g fill="none" stroke="#000" stroke-linejoin="round" stroke-linecap="round">
     <!-- shield outline -->
-    <path d="M12 2.5 L19.5 5.3 V11 C19.5 15.6 16.3 19.2 12 20.6 C7.7 19.2 4.5 15.6 4.5 11 V5.3 Z"/>
+    <path stroke-width="2"
+          d="M12,2.6 L19.4,5.4 V11.2 C19.4,15.7 16.3,19.3 12,20.7 C7.7,19.3 4.6,15.7 4.6,11.2 V5.4 Z"/>
     <!-- keyhole: ring + stem -->
-    <path d="M12 8.2 m-1.9 0 a1.9 1.9 0 1 0 3.8 0 a1.9 1.9 0 1 0 -3.8 0 M12 10.1 V14.6"/>
+    <path stroke-width="1.7"
+          d="M9.6,9.3 A2.4,2.4 0 0,1 14.4,9.3 A2.4,2.4 0 0,1 9.6,9.3 Z M12,11.7 V15.6"/>
   </g>
 </svg>
