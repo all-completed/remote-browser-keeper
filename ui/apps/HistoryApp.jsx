@@ -21,13 +21,16 @@ const badgeClass = (v) => (OK.has(v) ? "ok" : WARN.has(v) ? "warn" : "no");
 
 // Where the record is known from. Derived purely from which list(s) it was found in
 // (see src/historymerge.js) — never guessed from a status. While the server list is
-// missing we can only claim "local", not "local only": the request may well be on the
+// missing we can only claim "client", not "client only": the request may well be on the
 // server too, we just couldn't ask.
+//
+// The labels name the two sides — "server + client" rather than "both" — because "both"
+// only means something once you already know what the two lists are.
 function provenance(source, serverKnown) {
-  if (source === "both") return { label: "both", title: "Recorded on this device and by the service" };
+  if (source === "both") return { label: "server + client", title: "Recorded on this device and by the service" };
   if (source === "server") return { label: "server only", title: "The service has this request; this device has no record of it (answered on another device, or never delivered here)" };
-  if (serverKnown) return { label: "local only", title: "This device has this request; the service's list does not" };
-  return { label: "local", title: "From this device's log. The service's list could not be loaded, so this request may exist there too." };
+  if (serverKnown) return { label: "client only", title: "This device has this request; the service's list does not" };
+  return { label: "client", title: "From this device's log. The service's list could not be loaded, so this request may exist there too." };
 }
 
 function HistoryEntry({ it, filter, onFilter, serverKnown }) {
@@ -40,7 +43,7 @@ function HistoryEntry({ it, filter, onFilter, serverKnown }) {
   // When the two sides disagree on the same request_id, both are shown, labelled —
   // picking one would hide either what the service did or what this device did.
   const badges = it.disagree
-    ? [{ src: "local", v: it.outcome }, { src: "server", v: it.status }]
+    ? [{ src: "client", v: it.outcome }, { src: "server", v: it.status }]
     : [{ src: null, v: it.effective || "unknown" }];
   const hasShot = it.local_screenshot || it.server_screenshot;
 

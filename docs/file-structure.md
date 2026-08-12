@@ -118,15 +118,18 @@ server-minted `request_id`, so a request is matched, never duplicated.
 
 **Precedence** (implemented in `src/historymerge.js`, pinned by `test/history.test.mjs`):
 
-1. **Provenance** — each row is tagged **local only** / **server only** / **both**,
-   derived *only* from which list(s) the `request_id` was found in. Never inferred
-   from a status. While the service's list is unavailable the tag reads just **local**:
-   the request may well exist there too, we simply couldn't ask.
+1. **Provenance** — each row is tagged **client only** / **server only** /
+   **server + client**, derived *only* from which list(s) the `request_id` was found
+   in. Never inferred from a status. While the service's list is unavailable the tag
+   reads just **client**: the request may well exist there too, we simply couldn't ask.
+   (The tags name the two sides rather than saying "both", which only means something
+   once you already know what the two lists are. The `source` field underneath keeps
+   its `local` / `server` / `both` values — that is data, not wording.)
 2. **Status** — the service's `status` is authoritative for *what happened to the
    request* (it alone sees the fill succeed or error, the expiry, another device
    answering); the local `outcome` is authoritative for *what this device did*.
-   **Neither overwrites the other.** When they disagree the row shows **both**,
-   labelled by source (`local: ui_failed` · `server: cancelled`). `submitted`/`autofilled`
+   **Neither overwrites the other.** When they disagree the row shows both values,
+   labelled by source (`client: ui_failed` · `server: cancelled`). `submitted`/`autofilled`
    ↔ `filled` and `cancelled` ↔ `cancelled` are the same event and collapse to one badge;
    everything else — including `ui_failed` vs `cancelled` — is shown as a disagreement,
    because the local word is the more specific one and exists nowhere else.
