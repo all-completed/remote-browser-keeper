@@ -44,6 +44,19 @@ function _secretIdFromMaster(master) {
   return _sha256(Buffer.concat([ID_DOMAIN, master])).toString("hex");
 }
 
+// The master for a stored key config, plus the envelope prefix that format carries
+// (the pbkdf2 salt; empty for sha256). One place so encrypt and the status report can
+// never disagree about how a held key derives.
+function _masterFromKey(key) {
+  const format = key.format || FORMAT_SHA256_V2;
+  if (format === FORMAT_PBKDF2_V2) {
+    const salt = Buffer.from(String(key.salt || ""), "base64");
+    if (salt.length !== SALT_BYTES) throw new Error("pbkdf2 vault key missing salt");
+    return { format, master: _masterPbkdf2(key.password, salt), prefix: salt };
+  }
+  return { format, master: _masterSha256(key.password), prefix: Buffer.alloc(0) };
+}
+
 // Generate a fresh high-entropy vault password (item 1). base64url of 32 random bytes.
 export function generateVaultKey() {
   return { password: crypto.randomBytes(32).toString("base64url"), format: FORMAT_SHA256_V2 };
@@ -55,18 +68,8 @@ export function userVaultKey(password) {
 
 // --- encrypt / decrypt ----------------------------------------------------------
 export function encryptVault(key, obj) {
-  const format = key.format || FORMAT_SHA256_V2;
+  const { format, master, prefix } = _masterFromKey(key);
   const iv = crypto.randomBytes(12);
-  let master;
-  let prefix = Buffer.alloc(0);
-  if (format === FORMAT_PBKDF2_V2) {
-    const salt = Buffer.from(String(key.salt || ""), "base64");
-    if (salt.length !== SALT_BYTES) throw new Error("pbkdf2 vault key missing salt");
-    master = _masterPbkdf2(key.password, salt);
-    prefix = salt;
-  } else {
-    master = _masterSha256(key.password);
-  }
   const cipher = crypto.createCipheriv("aes-256-gcm", master, iv);
   const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(obj || {}), "utf8")), cipher.final()]);
   return {
@@ -113,6 +116,26 @@ export function expectedSecretId(key, b64, format) {
   const fmt = format || key.format || FORMAT_SHA256_V2;
   const { master } = _openEnvelope(fmt, key.password, b64);
   return fmt === FORMAT_V1 ? master.toString("hex") : _secretIdFromMaster(master);
+}
+
+// Non-secret description of the vault key this device holds, for reporting to the
+// service and showing in the UI: which blob schema we write, which key format we are on,
+// and the opaque id of the vault we can open. `key` is a stored config (vaultkey.js) or
+// null when this device holds none.
+//
+// SECURITY — the secret_id asymmetry. Under v2 the id is domain-separated from the AES
+// key (sha256("rbvault-id-v2" ‖ master)) and reveals nothing, so it is safe to publish.
+// Under legacy aesgcm-sha256-v1 the id IS the key (hex(sha256(password)), see the header),
+// so a v1 device reports its FORMAT and NO id — publishing it would publish a live key.
+// Any other reporting path must go through here rather than compute an id itself.
+export function vaultKeyReport(key) {
+  const base = { schema: VAULT_SCHEMA, has_key: false, key_format: null, legacy: false, secret_id: null };
+  if (!key || typeof key.password !== "string" || !key.password) return base;
+  const format = key.format || FORMAT_SHA256_V2;
+  if (format === FORMAT_V1) return { ...base, has_key: true, key_format: FORMAT_V1, legacy: true };
+  let secret_id = null;
+  try { secret_id = _secretIdFromMaster(_masterFromKey(key).master); } catch { secret_id = null; } // e.g. pbkdf2 key with a lost salt
+  return { ...base, has_key: true, key_format: format, secret_id };
 }
 
 // The vault blob is a set of independent collections, each a map of entries merged by
@@ -195,17 +218,23 @@ export async function putVault({ baseUrl, apiKey }, key, data, baseVersion, { fe
 // Pull → mergeBlob(remoteBlob) → push at the pulled version, retrying on 409 by
 // re-pulling and re-applying. `mergeBlob` receives the decrypted remote blob (all
 // collections) and returns the blob to store (an idempotent merge, so re-applying after
-// a conflict is safe). Returns the final blob that was pushed.
-export async function syncVault(cfg, key, mergeBlob, { fetchImpl = fetch, retries = 5 } = {}) {
+// a conflict is safe). Returns the final blob that was pushed. `onVersion` (optional) is
+// called with the vault version this device is now on — the counter the caller reports as
+// "last synced version"; it fires for a no-op skip too, since that version is current.
+export async function syncVault(cfg, key, mergeBlob, { fetchImpl = fetch, retries = 5, onVersion = null } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const { version, data, format } = await pullVault(cfg, key, { fetchImpl });
     const remoteBlob = normalizeBlob(data);
     const nextBlob = normalizeBlob(await mergeBlob(remoteBlob));
     // Skip a no-op write ONLY when the stored format already matches our key's format —
     // otherwise a re-key (password change) with unchanged data would never be pushed.
-    if (version > 0 && format === key.format && stableStringify(nextBlob) === stableStringify(remoteBlob)) return nextBlob;
+    if (version > 0 && format === key.format && stableStringify(nextBlob) === stableStringify(remoteBlob)) {
+      if (onVersion) onVersion(version);
+      return nextBlob;
+    }
     const res = await putVault(cfg, key, nextBlob, version, { fetchImpl });
     if (res.conflict) continue;
+    if (onVersion) onVersion(Number(res.version) || version + 1);
     return nextBlob;
   }
   throw new Error("vault sync failed after repeated version conflicts");

@@ -15,6 +15,7 @@ import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
+import { buildDeviceReport } from "./device.js";
 import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { mergeHistory } from "./historymerge.js";
@@ -191,7 +192,12 @@ function connect() {
   ws.on("open", () => {
     connected = true;
     reconnectDelay = 1000;
-    safeSend({ type: "hello", app: "remote-browser-keeper", version: app.getVersion() });
+    // Say who we are and which vault we hold, so the account can be asked "which devices
+    // are paired, and is any of them stuck on the legacy key model?". Inert metadata only
+    // (see device.js). `app`/`version` stay at the top level for older services.
+    const report = deviceReport({ refresh: true });
+    safeSend({ type: "hello", app: "remote-browser-keeper", version: app.getVersion(), ...report });
+    lastSentReport = JSON.stringify(report);
     startHeartbeat();
     updateTray();
     console.log("[keeper] connected");
@@ -353,6 +359,7 @@ async function syncVaultNow() {
       { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
       r.key,
       (remoteBlob) => mergeVaultBlob(cfg.baseUrl, remoteBlob),
+      { onVersion: (v) => { vaultLastVersion = v; } },
     );
     console.log("[keeper] vault synced");
     // Cards now live only in the synced vault — once it has them, remove any legacy
@@ -368,7 +375,44 @@ async function syncVaultNow() {
     }
   } finally {
     vaultSyncing = false;
+    reportDeviceState(); // the sync just settled our vault state — publish it if it moved
   }
+}
+
+// ---------- Device identity + vault state ----------
+// What this device is and which vault it holds (device.js). Sent in `hello` on connect
+// and again as `device_state` whenever it changes, so the account can list its paired
+// devices and spot one stuck on the legacy v1 key model. The report is cached because
+// building it derives the key id (pbkdf2 for a user password — too slow to redo on every
+// tray redraw); anything that changes the vault state refreshes it.
+let vaultLastVersion = null; // last vault version this device synced to
+let vaultLegacyKey = false;  // cached: this device holds a legacy aesgcm-sha256-v1 key
+let cachedReport = null;     // { device, vault }
+let lastSentReport = "";     // JSON of the report we last put on the wire
+
+function deviceReport({ refresh = false } = {}) {
+  if (refresh || !cachedReport) {
+    try {
+      cachedReport = buildDeviceReport(loadConfig().baseUrl, { needsRepair: vaultNeedsRepair, version: vaultLastVersion });
+      vaultLegacyKey = !!cachedReport.vault.legacy;
+    } catch (e) {
+      console.warn("[keeper] device report failed:", e.message);
+      cachedReport = cachedReport || { device: null, vault: null };
+    }
+  }
+  return cachedReport;
+}
+
+// Rebuild the report and, if anything actually changed, push it to the service. Cheap to
+// call from every path that touches vault state — an unchanged state sends nothing.
+function reportDeviceState() {
+  const report = deviceReport({ refresh: true });
+  if (!report.device) return;
+  const json = JSON.stringify(report);
+  if (json === lastSentReport) return;
+  lastSentReport = json;
+  safeSend({ type: "device_state", ...report });
+  updateTray(); // the legacy-key warning lives in the tray menu
 }
 
 // Unattended card fill: if every requested field is a card-* kind and a saved
@@ -856,7 +900,7 @@ function openSettingsWindow() {
   if (settingsWin) { settingsWin.show(); settingsWin.focus(); return; }
   settingsWin = new BrowserWindow({
     width: 420,
-    height: 340,
+    height: 500, // fits the "This device" panel above the preferences without scrolling
     resizable: false,
     fullscreenable: false,
     title: "Remote Browser Keeper — Settings",
@@ -919,6 +963,17 @@ ipcMain.handle("keeper:vault-status", () => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
+// The same identity + vault state we report to the service, for the Settings window — so
+// "what is this device on?" is answerable without asking the service. Inert metadata: no
+// password, no key, and (per vaultKeyReport) no secret_id for a legacy v1 key.
+ipcMain.handle("keeper:device-info", () => {
+  try {
+    const report = deviceReport();
+    if (!report.device) return { ok: false, error: "device report unavailable" };
+    return { ok: true, ...report };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 // Item 3: set a user-chosen vault password. Reads the current vault under the current
 // key, re-encrypts it under the new password (pbkdf2), and re-uploads — so no data is
 // lost. Other paired devices then see a secret_id mismatch and must re-pair to resync.
@@ -941,6 +996,8 @@ ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
     const put = await putVault(conn, newKey, current.data || emptyVault(), current.version);
     if (put.conflict) return { ok: false, error: "Vault changed during re-key — try again." };
     saveVaultKey(cfg.baseUrl, newKey);
+    vaultLastVersion = Number(put.version) || vaultLastVersion;
+    reportDeviceState(); // new key format + new vault id — tell the service which vault we're on now
     console.log("[keeper] vault re-keyed to a custom password (pbkdf2-v2); other devices must re-pair");
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
@@ -1185,6 +1242,9 @@ function updateTray() {
     { label: "Set vault password…", click: openVaultPwWindow },
     { label: "Settings…", click: openSettingsWindow },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
+    // A device left on the v1 key model is a real exposure (v1's stored id IS the key),
+    // so name it in the menu bar. Setting a vault password re-encrypts onto v2.
+    ...(vaultLegacyKey ? [{ label: "⚠︎ Vault: legacy v1 key — set a vault password to migrate", click: openVaultPwWindow }] : []),
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
   ]));

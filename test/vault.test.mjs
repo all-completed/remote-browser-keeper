@@ -11,8 +11,9 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import {
   encryptVault, decryptVault, expectedSecretId, generateVaultKey, userVaultKey,
-  pullVault, putVault, syncVault, VaultKeyMismatch,
-  legacyV1SecretId, decryptLegacyV1, FORMAT_SHA256_V2, FORMAT_PBKDF2_V2, PBKDF2_ITERATIONS,
+  pullVault, putVault, syncVault, VaultKeyMismatch, vaultKeyReport,
+  legacyV1SecretId, decryptLegacyV1, FORMAT_V1, FORMAT_SHA256_V2, FORMAT_PBKDF2_V2, PBKDF2_ITERATIONS,
+  VAULT_SCHEMA,
 } from "../src/vault.js";
 
 const BLOB = { schema: 1, fields: { "s|h|#pw": { value: "hunter2", auto: true, updated_at: "2026-01-01T00:00:00Z" } } };
@@ -113,6 +114,52 @@ test("a fields-only client preserves the cards collection (mobile behavior)", as
   const out = await syncVault(cfg, key, (b) => ({ ...b, fields: { ...b.fields, x: { value: "X", updated_at: "2026-01-03T00:00:00Z" } } }), { fetchImpl: svc.fetchImpl });
   assert.equal(out.cards.visa.number, "4111"); // survived
   assert.equal(out.fields.x.value, "X");
+});
+
+test("syncVault reports the version this device is now on (incl. a no-op re-sync)", async () => {
+  const svc = fakeService();
+  const cfg = { baseUrl: "http://x", apiKey: "k" };
+  const key = generateVaultKey();
+  const seen = [];
+  const onVersion = (v) => seen.push(v);
+  const add = (b) => ({ ...b, fields: { ...b.fields, a: { value: "A", updated_at: "2026-01-01T00:00:00Z" } } });
+  await syncVault(cfg, key, add, { fetchImpl: svc.fetchImpl, onVersion });
+  await syncVault(cfg, key, add, { fetchImpl: svc.fetchImpl, onVersion }); // nothing changed → no write
+  assert.deepEqual(seen, [1, 1]);
+  assert.equal(svc.peek().version, 1); // the no-op really didn't push
+});
+
+test("vaultKeyReport describes the held key: format + opaque id, never the key itself", () => {
+  const gen = generateVaultKey();
+  const rg = vaultKeyReport(gen);
+  assert.deepEqual(rg, {
+    schema: VAULT_SCHEMA, has_key: true, key_format: FORMAT_SHA256_V2, legacy: false,
+    secret_id: expectedSecretId(gen, encryptVault(gen, BLOB).ciphertext, FORMAT_SHA256_V2),
+  });
+  // the id is the one the service stores for our blob, and is NOT the AES key
+  assert.equal(rg.secret_id, encryptVault(gen, BLOB).secret_id);
+  assert.notEqual(rg.secret_id, crypto.createHash("sha256").update(gen.password, "utf8").digest("hex"));
+
+  const user = userVaultKey("correct horse battery staple");
+  const ru = vaultKeyReport(user);
+  assert.equal(ru.key_format, FORMAT_PBKDF2_V2);
+  assert.equal(ru.secret_id, encryptVault(user, BLOB).secret_id); // salt-dependent id, still opaque
+
+  // no key held at all is its own answer — distinct from "holds a vault it can't open"
+  assert.deepEqual(vaultKeyReport(null), { schema: VAULT_SCHEMA, has_key: false, key_format: null, legacy: false, secret_id: null });
+  // nothing in any report is the password
+  for (const r of [rg, ru]) assert.equal(JSON.stringify(r).includes(gen.password) || JSON.stringify(r).includes(user.password), false);
+});
+
+test("SECURITY: a legacy v1 key reports its format but NEVER its secret_id (the id is the key)", () => {
+  const v1 = { password: "the old session secret", format: FORMAT_V1 };
+  const r = vaultKeyReport(v1);
+  assert.equal(r.has_key, true);
+  assert.equal(r.key_format, FORMAT_V1);
+  assert.equal(r.legacy, true); // → flagged for migration, not just "a different string"
+  assert.equal(r.secret_id, null);
+  // what we must never publish: under v1 the stored id IS the AES key, in hex.
+  assert.equal(JSON.stringify(r).includes(legacyV1SecretId(v1.password)), false);
 });
 
 test("migration: a legacy v1 blob (keyed by the session secret) still decrypts", () => {

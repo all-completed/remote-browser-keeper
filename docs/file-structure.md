@@ -34,6 +34,7 @@ remote-browser-keeper/
 | --- | --- |
 | `main.js` | The whole main process: tray-only lifecycle (dock hidden), the **Keeper WebSocket client** (connect/reconnect, `hello`/`ping`/`pong`, receive `fill_request`, send `fill_response`), the **prompt-window queue**, the **History window**, the **full-size image viewer**, the **tray menu** (service host + connection state, History…, Quit), and **local history + screenshot storage** (see below). |
 | `config.js` | Resolves `{ baseUrl, apiKey }` — `RBS_URL` / default `https://rb.example.com`, and the API key from `AC_API_KEY` / `RBS_API_KEY` / `AC_API_KEY_FILE` / `~/.ac-api-key`. Also derives `keeperWsUrl`. |
+| `device.js` | This device's identity (`device.json` id, machine name, platform, app version) and the inert vault-state report sent on connect / shown in Settings — see [`device.json`](#devicejson--who-this-device-is). |
 | `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
 | `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel`, `viewImage`. |
@@ -78,6 +79,7 @@ prod Keeper keep separate stores automatically:
     ├── history.jsonl                   # value-free request log (newest appended)
     ├── secrets.json                    # session-unlock secrets (by secret_id)
     │                                   # (no cards.json — saved cards live only in the synced vault)
+    ├── device.json                     # this device's stable id (non-secret label)
     ├── fields.json                     # "forever" saved field values (this device only)
     ├── vault.json                      # "vault" saved fields — local cache of the synced vault
     ├── screenshots/
@@ -261,6 +263,23 @@ salt? }`. The Keeper generates a high-entropy password on first use; the user ma
 it with their own via **Set vault password…** (which re-encrypts + re-uploads the vault,
 after which other devices must re-pair). This file never leaves the machine except as the
 vault password inside a pair QR.
+
+### `device.json` — who this device is
+
+`~/.remote-browser-keeper/<base-url>/device.json`, **plain JSON** (`{ "id": "<uuid>" }`) —
+a label, not a credential. Minted on first use and reused forever after; per base URL, so
+a dev and a prod Keeper on one machine are two distinct devices, as they already are for
+every other file here.
+
+`src/device.js` turns it into the report the Keeper sends in `hello` (and again as
+`device_state` when it changes) and shows under **Settings… → This device**: the id, the
+machine name, the platform, the app version, and the vault's `schema` / `key_format` /
+last synced `version` / `state` (`ok` · `no_key` · `needs_repair` · `legacy_v1`). That
+answers "which devices hold a vault, and is any of them on the legacy key model?" — the
+last one being a security question, since v1's stored `secret_id` **is** the AES key.
+Which is why the report of a v1 device carries its format and **no** `secret_id`
+(`vaultKeyReport`, `src/vault.js`). Nothing in the report is a secret: no vault password,
+no derived key, no field or card values.
 
 ### Electron user-data dir (separate)
 
