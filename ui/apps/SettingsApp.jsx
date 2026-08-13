@@ -1,14 +1,37 @@
 import { useEffect, useState } from "react";
 
-// Per-device Keeper preferences. Currently a single toggle for how password generation
-// behaves: by default the Keeper generates + fills a new password with no prompt; turning
-// this on makes it open the password window instead, so you can review/edit or regenerate
-// the value before it's filled. Non-secret and local to this device.
+// How the vault state reported by the main process (device.js `state`) reads to a human.
+// `tone` picks the color: a legacy v1 key or an undecryptable vault are problems to fix,
+// not version trivia.
+const VAULT_STATE = {
+  ok: { tone: "ok", text: "In sync — current key model (v2)." },
+  no_key: { tone: "muted", text: "No vault key on this device — pair it, or save a field to the vault to create one." },
+  needs_repair: { tone: "bad", text: "A vault exists but this device can't decrypt it — re-pair this device." },
+  legacy_v1: { tone: "bad", text: "Legacy key model — needs migration. Use “Set vault password…” to re-encrypt onto v2." },
+};
+const TONE = { ok: "var(--ok, #57d38c)", bad: "var(--danger, #ef6b6b)", muted: "var(--muted2)" };
+
+// One label/value line of the device panel.
+function Row({ label, children, mono }) {
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "baseline", padding: "3px 0" }}>
+      <span style={{ flex: "0 0 92px", fontSize: 12, color: "var(--muted2)" }}>{label}</span>
+      <span style={{ fontSize: 12.5, color: "var(--text, #e8eefc)", wordBreak: "break-all",
+        fontFamily: mono ? "ui-monospace, SFMono-Regular, Menlo, monospace" : undefined }}>{children}</span>
+    </div>
+  );
+}
+
+// Per-device Keeper preferences, plus a read-only panel naming this device and the vault
+// it holds. Everything shown here is the same inert metadata the Keeper reports to the
+// service on connect (no password, no key, and no `secret_id` for a legacy v1 key —
+// there the id IS the key, see src/vault.js).
 export default function SettingsApp() {
   const [loading, setLoading] = useState(true);
   const [showWindow, setShowWindow] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
+  const [info, setInfo] = useState(null); // { device, vault } | { error }
 
   useEffect(() => {
     (async () => {
@@ -18,6 +41,12 @@ export default function SettingsApp() {
         else setErr((r && r.error) || "Could not load settings.");
       } catch (e) { setErr(e.message); }
       setLoading(false);
+    })();
+    (async () => {
+      try {
+        const r = await window.keeperSettings.deviceInfo?.();
+        setInfo(r && r.ok ? r : { error: (r && r.error) || "Could not read this device's state." });
+      } catch (e) { setInfo({ error: e.message }); }
     })();
   }, []);
 
@@ -44,6 +73,32 @@ export default function SettingsApp() {
 
         <section style={{ padding: "6px 2px" }}>
           <div style={{ fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.6, color: "var(--muted2)", margin: "4px 0 10px" }}>
+            This device
+          </div>
+
+          {!info ? (
+            <p style={{ fontSize: 12.5, color: "var(--muted2)", margin: 0 }}>…</p>
+          ) : info.error ? (
+            <p style={{ fontSize: 12.5, color: "var(--danger, #ef6b6b)", margin: 0 }}>{info.error}</p>
+          ) : (
+            <>
+              <Row label="Device">{info.device.name} · {info.device.platform} · v{info.device.app_version}</Row>
+              <Row label="Device ID" mono>{info.device.id}</Row>
+              <Row label="Vault">
+                {info.vault.has_key
+                  ? <>schema {info.vault.schema} · {info.vault.key_format}{info.vault.version != null ? ` · version ${info.vault.version}` : " · not synced yet"}</>
+                  : <>none held</>}
+              </Row>
+              {/* Present only for v2 — a v1 device reports no id, because there it IS the key. */}
+              {info.vault.secret_id && <Row label="Vault ID" mono>{info.vault.secret_id.slice(0, 16)}…</Row>}
+              <p style={{ fontSize: 12.5, lineHeight: 1.5, margin: "8px 0 0",
+                color: TONE[(VAULT_STATE[info.vault.state] || {}).tone] || "var(--muted2)" }}>
+                {(VAULT_STATE[info.vault.state] || { text: info.vault.state }).text}
+              </p>
+            </>
+          )}
+
+          <div style={{ fontSize: 12.5, textTransform: "uppercase", letterSpacing: 0.6, color: "var(--muted2)", margin: "22px 0 10px" }}>
             Password generation
           </div>
 

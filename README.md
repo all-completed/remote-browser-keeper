@@ -78,9 +78,36 @@ Keeper → server:
 { "type": "fill_response", "request_id": "uuid", "cancelled": true }
 { "type": "fill_response", "request_id": "uuid", "cancelled": true,
   "error": "keeper_ui_failed", "reason": "content loaded but never painted" }
-{ "type": "hello", "app": "remote-browser-keeper", "version": "0.1.0" }
+{ "type": "hello", "app": "remote-browser-keeper", "version": "0.1.0",
+  "device": { "id": "6f1c…-uuid", "name": "vasyas-mbp", "platform": "macOS", "app_version": "0.1.0" },
+  "vault": { "schema": 1, "has_key": true, "key_format": "aesgcm-sha256-v2", "legacy": false,
+             "needs_migration": false, "secret_id": "a8ab…", "version": 7, "state": "ok" } }
+{ "type": "device_state", "device": { … }, "vault": { … } }
 { "type": "pong" }
 ```
+
+`device` + `vault` say **which device this is and which vault it holds**, so an account can
+list its paired devices and see a version skew — or a device stuck on the legacy key model —
+*before* it turns into a failed fill or a silent security gap. `device_state` repeats the
+same two blocks whenever they change (after a sync, or after the vault password is
+re-keyed); an unchanged state sends nothing. Both are **inert metadata** — no vault
+password, no derived key, no session secret, no field or card values.
+
+`vault.state` is the field to act on, and it keeps apart two failures that look identical
+from outside:
+
+| `state` | meaning | fix |
+| --- | --- | --- |
+| `ok` | on a v2 key model, vault readable | — |
+| `no_key` | this device holds no vault key (never paired, or cleared) | pair it |
+| `needs_repair` | a vault exists but this device can't decrypt it (`VaultKeyMismatch`) | re-pair it |
+| `legacy_v1` | still on legacy `aesgcm-sha256-v1` | **migrate** — Set vault password… |
+
+`secret_id` is the opaque, domain-separated id of the vault this device can open
+(`sha256("rbvault-id-v2" ‖ master)`), so it is safe to publish and lets the service group
+devices by vault. Under legacy `aesgcm-sha256-v1` the stored id **is** the AES key, so a v1
+device reports its `key_format` and **`secret_id: null`** — see `vaultKeyReport` in
+`src/vault.js`, which is the only place allowed to produce this field.
 
 `error: "keeper_ui_failed"` means the **approval window could not be shown** — the user was
 never asked. It is deliberately distinct from a plain cancel (the user declined) and from a
