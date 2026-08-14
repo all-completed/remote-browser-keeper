@@ -97,6 +97,14 @@ function HistoryEntry({ it, filter, onFilter, serverKnown }) {
           {names.join(", ")}
         </div>
       )}
+      {/* The note the user attached when declining — kept beside the request instead of
+          living only in whatever chat they explained themselves in (issue #11). */}
+      {it.reason && (
+        <div className="fields">
+          <span className="k">declined: </span>
+          {it.reason}
+        </div>
+      )}
       {hasShot && (
         <>
           <button type="button" className="shot-btn" disabled={unavailable} onClick={toggle}>

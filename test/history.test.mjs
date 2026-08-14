@@ -127,6 +127,21 @@ test("screenshot availability is tracked per side", () => {
   assert.deepEqual([m.c.local_screenshot, m.c.server_screenshot], [false, true]); // server-only record
 });
 
+// Issue #11: the user's note on a decline is only ever recorded HERE, so the merge must
+// carry it through — including onto a row the service also knows about.
+test("a decline reason survives the merge and is never invented for a server row", () => {
+  const out = mergeHistory(
+    [local("why", "cancelled", iso(T), { reason: "I already did this myself" }),
+     local("plain", "cancelled", iso(T - 1))],
+    [server("why", "cancelled", T), server("srv", "cancelled", T - 2)],
+  );
+  const m = byId(out);
+  assert.equal(m.why.reason, "I already did this myself");
+  assert.equal(m.why.source, "both"); // folding the service's row must not drop it
+  assert.equal(m.plain.reason, null); // declined without a note
+  assert.equal(m.srv.reason, null);   // the service does not carry one
+});
+
 test("an entry evicted locally reappears from the service rather than vanishing", () => {
   // Local eviction (>6 months / >2000 entries) drops the line; the service still has it.
   const out = mergeHistory([], [server("old", "filled", T - 400 * 24 * 3600)]);

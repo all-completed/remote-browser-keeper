@@ -5,6 +5,7 @@ import FieldRow from "../components/FieldRow.jsx";
 import CardPicker from "../components/CardPicker.jsx";
 import ProofImage from "../components/ProofImage.jsx";
 import { Field } from "../components/Field.jsx";
+import { DECLINE_PRESETS, DECLINE_REASON_MAX, normalizeDeclineReason } from "../../src/declinereason.js";
 
 export default function PromptApp() {
   const [req, setReq] = useState(getLatest());
@@ -14,6 +15,8 @@ export default function PromptApp() {
   const [saveScope, setSaveScope] = useState(""); // "" | "session" | "forever" | "forget"
   const [savedExisting, setSavedExisting] = useState(false); // a stored value was prefilled
   const [dontAsk, setDontAsk] = useState(false); // auto-fill silently next time
+  const [declining, setDeclining] = useState(false); // the "why?" panel is open
+  const [note, setNote] = useState(""); // free-text decline reason (plain text, never a secret)
 
   useEffect(() => subscribe(setReq), []);
 
@@ -50,6 +53,8 @@ export default function PromptApp() {
     setSaveScope("");
     setSavedExisting(false);
     setDontAsk(false);
+    setDeclining(false);
+    setNote("");
     if (!req) return;
     const reqFields = Array.isArray(req.fields) ? req.fields : [];
     // Generate a fresh strong value for any generate-field, and default to saving it.
@@ -149,7 +154,15 @@ export default function PromptApp() {
     window.keeper.submit(req.request_id, out);
     finish();
   };
-  const cancel = () => { window.keeper.cancel(req.request_id); finish(); };
+  // Decline. `reason` is optional plain text the agent gets to read, so it can pick its
+  // next move instead of guessing between retrying and giving up (issue #11). Called with
+  // nothing — the Cancel button, Escape, closing the window — it declines exactly as
+  // before. Normalized here so a whitespace-only note is the same as no note at all.
+  const cancel = (reason) => {
+    const why = normalizeDeclineReason(reason);
+    window.keeper.cancel(req.request_id, why || undefined);
+    finish();
+  };
 
   return (
     <>
@@ -215,8 +228,55 @@ export default function PromptApp() {
         </div>
 
         <p id="note">Sent to the service and typed into the form for you. Never shown to the AI model.</p>
+
+        {/* Why the request is being declined — opened in place from the ▾ beside Cancel, so
+            saying "wrong account" costs one extra tap and no navigation. Each preset
+            declines on its own click; the input is for anything the presets don't cover. */}
+        {declining && (
+          <div id="decline">
+            <div id="presets">
+              {DECLINE_PRESETS.map((p) => (
+                <button key={p} type="button" className="preset" onClick={() => cancel(p)}>{p}</button>
+              ))}
+            </div>
+            <span className="inrow">
+              <input
+                id="declinenote"
+                type="text"
+                value={note}
+                maxLength={DECLINE_REASON_MAX}
+                placeholder="…or say why in your own words"
+                autoFocus
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="sentences"
+                spellCheck={false}
+                onChange={(e) => setNote(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); cancel(note); }
+                  else if (e.key === "Escape") { e.preventDefault(); setDeclining(false); }
+                }}
+              />
+              <button id="declinesend" type="button" onClick={() => cancel(note)}>Decline</button>
+            </span>
+            <p className="hint">Goes to the AI as ordinary text, so it can decide what to do next — never put a password here.</p>
+          </div>
+        )}
+
         <div id="actions">
-          <button id="cancel" type="button" onClick={cancel}>Cancel</button>
+          <span id="declinegroup">
+            <button id="cancel" type="button" onClick={() => cancel()}>Cancel</button>
+            <button
+              id="why"
+              type="button"
+              aria-expanded={declining}
+              aria-label="Decline with a reason"
+              title="Decline with a reason"
+              onClick={() => setDeclining((v) => !v)}
+            >
+              ▾
+            </button>
+          </span>
           <button id="send" type="button" onClick={send}>Send</button>
         </div>
       </main>

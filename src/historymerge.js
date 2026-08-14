@@ -64,6 +64,8 @@ function fromLocal(r) {
     status: null,                 // what the service recorded
     effective: r.outcome || null,
     disagree: false,
+    reason: typeof r.reason === "string" ? r.reason : null, // the user's note on a decline
+
     session_id: r.session_id || null,
     url: r.url || null,
     requested_at: toIso(r.requested_at),
@@ -83,6 +85,8 @@ function fromServer(r) {
     status: r.status || null,
     effective: r.status || null,
     disagree: false,
+    reason: null,                 // only this device records why the user declined
+
     session_id: r.session_id || null,
     url: r.url || null,
     requested_at: toIso(r.created_at),
