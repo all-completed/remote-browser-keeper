@@ -37,7 +37,8 @@ remote-browser-keeper/
 | `device.js` | This device's identity (`device.json` id, machine name, platform, app version) and the inert vault-state report sent on connect / shown in Settings — see [`device.json`](#devicejson--who-this-device-is). |
 | `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
-| `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel`, `viewImage`. |
+| `declinereason.js` | The optional note a user attaches when **declining** (`DECLINE_PRESETS`, `DECLINE_REASON_MAX`, `normalizeDeclineReason`). Shared by the prompt UI and the main process, which re-normalizes whatever the renderer sends. Plain text meant for the agent — never a value. |
+| `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
 
@@ -52,7 +53,7 @@ to the main process only through their preload bridge.
 
 | Files | Window |
 | --- | --- |
-| `prompt.{html,css,js}` | The **fill prompt**: one proof screenshot (tap to enlarge), session/url chips, the agent's message, and one masked input per field (reveal toggle, `length` cap, `format` constraint). Send / Cancel. |
+| `prompt.{html,css,js}` | The **fill prompt**: one proof screenshot (tap to enlarge), session/url chips, the agent's message, and one masked input per field (reveal toggle, `length` cap, `format` constraint). Send / Cancel — with a **▾ beside Cancel** that opens preset + free-text decline reasons in place (see [Declining with a reason](#declining-with-a-reason)). |
 | `history.{html,css,js}` | The **History** window: past requests (status, provenance, session, url, fields, time) with a *View screenshot* toggle. One list merged from this device's log **and** the service's — see [Request history — one list from two](#request-history--one-list-from-two). |
 | `image.{html,js}` | The **full-size screenshot viewer** (opened from the prompt or History; the window fits the image's natural size). |
 
@@ -63,6 +64,28 @@ The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
 preload bridge (e.g. `keeper:request`, `history:data`, `image:data`) and back via
 IPC (`keeper:submit`, `history:screenshot`, `keeper:view-image`). The typed value
 travels renderer → main → WebSocket only; it is never written to disk or logged.
+
+### Declining with a reason
+
+A bare `cancelled` looks the same to the agent whether the user meant *"wrong account"*,
+*"not now"*, or *"I already did this myself"* — three answers that call for three different
+next moves. So a decline may carry the user's own short note:
+
+- the prompt's **▾** (right of Cancel) opens a panel **in place**: five one-tap presets for
+  the common declines, plus a free-text input for anything else;
+- **Cancel alone is untouched** — one tap, no note, byte-for-byte the frame it always sent;
+- the note goes out as `reason` beside `cancelled: true` (the field `keeper_ui_failed`
+  already uses; a user decline carries no `error`), is written to `history.jsonl`, and is
+  shown under that request in **History…** (`declined: …`) — only this device records it,
+  so the merge carries it onto the row even when the service knows the request too;
+- it is normalized in `src/declinereason.js` — trimmed, collapsed to one line, capped at
+  `DECLINE_REASON_MAX` (200), and **omitted entirely** when blank — first in the renderer
+  and again in main, which is the authority on what reaches the wire;
+- it is **ordinary text the model is meant to read**: its input is unmasked, never
+  prefilled from a saved value / card / vault, and never joins the `values` map.
+
+The agent only sees it once the service carries `reason` through the cancel path into
+`get_fill_status` (see the note in the README's WS protocol section).
 
 `history:data` carries `{ items, server }` — the merged rows plus
 `server: { state: "loading" | "ok" | "error", … }` — and main pushes it **twice** per
@@ -93,7 +116,8 @@ prod Keeper keep separate stores automatically:
 - **`history.jsonl`** — one JSON object per line, **never containing values**:
   `request_id`, `session_id`, `url`, `requested_at`, `resolved_at`,
   `outcome` (`submitted` | `cancelled` | `autofilled` | `ui_failed`), a `screenshot`
-  path, and per-field metadata (`selector`, `label`, `field`, `length`, `format`).
+  path, per-field metadata (`selector`, `label`, `field`, `length`, `format`), and —
+  only on a decline the user explained — a `reason` (their own words, never a value).
   Eviction runs on every write: keep the most recent **2000** entries and drop
   anything older than **~6 months**. Eviction no longer *hides* a request: an evicted
   entry the service still knows about comes back in the History window as

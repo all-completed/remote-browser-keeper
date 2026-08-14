@@ -20,6 +20,7 @@ import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { mergeHistory } from "./historymerge.js";
 import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
+import { normalizeDeclineReason } from "./declinereason.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -110,7 +111,9 @@ function reconcileScreenshots(keepIds) {
 // record, drop anything older than HISTORY_MAX_AGE_MS, keep the last HISTORY_MAX,
 // write once, then evict orphaned screenshots. Eviction therefore always runs at
 // the moment an event is added.
-function recordHistory(req, outcome) {
+// `reason` is the user's optional note on a decline (issue #11) — plain text, never a
+// value, and only present when they wrote one.
+function recordHistory(req, outcome, reason) {
   if (!req) return;
   try {
     const now = new Date();
@@ -122,6 +125,7 @@ function recordHistory(req, outcome) {
       requested_at: req._requested_at || null, // when the request arrived (ISO)
       resolved_at: now.toISOString(),
       outcome, // "submitted" (user sent values) | "cancelled"
+      ...(reason ? { reason } : {}), // why it was declined, when the user said
       screenshot: hasShot ? "screenshots/" + req.request_id + ".jpg" : null,
       fields: (Array.isArray(req.fields) ? req.fields : []).map((f) => ({
         selector: f.selector,
@@ -625,7 +629,7 @@ function focusRequest(requestId) {
 
 function resolveRequest(requestId, payload) {
   if (!pending.has(requestId)) return;
-  recordHistory(pending.get(requestId), payload.cancelled ? "cancelled" : "submitted");
+  recordHistory(pending.get(requestId), payload.cancelled ? "cancelled" : "submitted", payload.reason);
   safeSend({ type: "fill_response", request_id: requestId, ...payload });
   pending.delete(requestId);
   if (queue[0] === requestId) queue.shift();
@@ -650,8 +654,14 @@ function dismissRequest(requestId) {
 ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
 });
-ipcMain.on("keeper:cancel", (_e, { request_id }) => {
-  resolveRequest(request_id, { cancelled: true });
+// Decline. The optional `reason` is the user's short note about WHY (issue #11): it rides
+// back beside `cancelled: true` so the agent can tell "wrong account" from "not now" from
+// "I did it myself" instead of guessing. Normalized here as well as in the renderer — main
+// is the authority on what goes on the wire — and omitted entirely when there is none, so
+// a plain one-tap Cancel sends byte-for-byte what it always did.
+ipcMain.on("keeper:cancel", (_e, { request_id, reason } = {}) => {
+  const note = normalizeDeclineReason(reason);
+  resolveRequest(request_id, note ? { cancelled: true, reason: note } : { cancelled: true });
 });
 // Prompt asks for a saved card's values mapped onto the pending request's fields
 // (when the user picks a card to pre-fill). Values stay local; the user reviews

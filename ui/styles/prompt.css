@@ -80,10 +80,45 @@ body {
 
 #note { font-size: 11px; color: var(--muted2); margin: 11px 0 14px; line-height: 1.45; }
 
+/* Decline-with-a-reason panel (issue #11): presets first — the common declines are one
+   tap — then free text for everything else. Plain text, styled nothing like a secret
+   input, because the agent gets to read it. */
+#decline {
+  display: flex; flex-direction: column; gap: 9px;
+  margin: 0 0 12px; padding: 11px 12px;
+  background: var(--chip-bg); border: 1px solid var(--border); border-radius: 10px;
+}
+#presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.preset {
+  font-size: 11.5px; font-weight: 500; padding: 5px 10px; border-radius: 999px;
+  background: var(--panel2); color: var(--muted); border: 1px solid var(--border2);
+}
+.preset:hover { color: var(--text); border-color: var(--muted2); }
+#declinenote {
+  padding: 8px 11px; font-size: 13px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border2); border-radius: 9px; outline: none;
+  -webkit-user-select: text; user-select: text;
+}
+#declinenote:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18); }
+#declinenote::placeholder { color: var(--muted2); }
+#declinesend { font-size: 12.5px; padding: 8px 14px; background: var(--panel2); color: var(--text); border: 1px solid var(--border2); }
+#declinesend:hover { border-color: var(--muted2); }
+
 #actions { display: flex; justify-content: flex-end; gap: 8px; }
 button { font-size: 13px; padding: 9px 16px; border-radius: 9px; cursor: pointer; font-weight: 600; }
+/* Cancel + ▾ read as one control: tap the left half to decline as before, the right half
+   to say why first. */
+#declinegroup { display: flex; }
 #cancel { background: var(--chip-bg); color: var(--text); border: 1px solid var(--border2); }
 #cancel:hover { border-color: var(--muted2); }
+#declinegroup #cancel { border-radius: 9px 0 0 9px; border-right: none; }
+#why {
+  padding: 9px 10px; border-radius: 0 9px 9px 0; font-size: 11px; line-height: 1;
+  background: var(--chip-bg); color: var(--muted); border: 1px solid var(--border2);
+}
+#why:hover { color: var(--text); border-color: var(--muted2); }
+#why[aria-expanded="true"] { color: var(--text); background: var(--panel2); }
 #send {
   background: linear-gradient(180deg, var(--primary-hi), var(--primary));
   color: var(--primary-text); border: 1px solid var(--primary-hi);

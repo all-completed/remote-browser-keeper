@@ -77,6 +77,8 @@ Keeper → server:
 { "type": "fill_response", "request_id": "uuid", "value": "..." }
 { "type": "fill_response", "request_id": "uuid", "cancelled": true }
 { "type": "fill_response", "request_id": "uuid", "cancelled": true,
+  "reason": "I already did this myself" }
+{ "type": "fill_response", "request_id": "uuid", "cancelled": true,
   "error": "keeper_ui_failed", "reason": "content loaded but never painted" }
 { "type": "hello", "app": "remote-browser-keeper", "version": "0.1.0",
   "device": { "id": "6f1c…-uuid", "name": "vasyas-mbp", "platform": "macOS", "app_version": "0.1.0" },
@@ -108,6 +110,28 @@ from outside:
 devices by vault. Under legacy `aesgcm-sha256-v1` the stored id **is** the AES key, so a v1
 device reports its `key_format` and **`secret_id: null`** — see `vaultKeyReport` in
 `src/vault.js`, which is the only place allowed to produce this field.
+
+A **decline may say why**. `cancelled: true` on its own means only "dismissed", which reads
+the same whether the user meant *wrong account*, *not now*, or *I already did this myself* —
+three answers that call for three different next moves from the agent. The prompt therefore
+offers a **▾ next to Cancel** that opens, in place, five one-tap presets plus a free-text
+box; whatever is chosen or typed rides back as `reason` beside `cancelled: true` (no
+`error` — that stays reserved for the UI failure below). Properties, all enforced in
+`src/declinereason.js` and re-applied in main:
+
+- **Cancel alone is unchanged** — one tap, no note, exactly the frame it sent before.
+- The note is **trimmed, collapsed to a single line and capped at 200 characters**;
+  blank / whitespace-only input sends no `reason` field at all.
+- It is kept with the request in **History…** (`declined: …`), so the explanation no
+  longer lives only in whatever chat the user typed it into.
+- It is **ordinary text, written to be read by the model** — an unmasked input that is
+  never prefilled from a saved value, a card, or the vault, and never joins the values
+  map. A password does not belong in it and cannot get there by accident.
+
+> **Service side:** the agent sees this only once the service carries `reason` from the
+> cancel path into the `get_fill_status` payload (as it already does for `no_keeper`).
+> Until then the Keeper sends it and the field is simply ignored, exactly as an older
+> service ignores `keeper_ui_failed` — the decline itself still works.
 
 `error: "keeper_ui_failed"` means the **approval window could not be shown** — the user was
 never asked. It is deliberately distinct from a plain cancel (the user declined) and from a

@@ -11,7 +11,9 @@ contextBridge.exposeInMainWorld("keeper", {
   pendingRequest: () => ipcRenderer.invoke("keeper:pending-request"),
   rendered: (request_id) => ipcRenderer.send("keeper:prompt-rendered", { request_id }),
   submit: (request_id, values) => ipcRenderer.send("keeper:submit", { request_id, values }),
-  cancel: (request_id) => ipcRenderer.send("keeper:cancel", { request_id }),
+  // `reason` is the user's optional plain-text note on a decline ("wrong account", "I did
+  // it myself") — it IS shown to the agent, so it is never a value. Omitted on a plain tap.
+  cancel: (request_id, reason) => ipcRenderer.send("keeper:cancel", { request_id, reason }),
   cardValues: (request_id, card_id) => ipcRenderer.invoke("keeper:card-values", { request_id, card_id }),
   rememberCardDomain: (request_id, card_id) => ipcRenderer.invoke("keeper:remember-card-domain", { request_id, card_id }),
   rememberCardAllSites: (request_id, card_id) => ipcRenderer.invoke("keeper:remember-card-all-sites", { request_id, card_id }),
