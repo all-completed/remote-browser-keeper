@@ -49,7 +49,10 @@ function toIso(ts) {
 // genuine disagreement and both values are surfaced. `ui_failed` is deliberately NOT paired
 // with `cancelled`: the keeper can only report a generic cancel over the wire, so the local
 // value is strictly more informative and must not be collapsed away.
-const SAME_EVENT = { submitted: ["filled"], autofilled: ["filled"], cancelled: ["cancelled"] };
+// `expired` IS the server's `timeout`: both sides watched the same deadline pass (the
+// Keeper reads it off the fill_request frame — see src/deadline.js), so seeing them
+// side by side as a disagreement would be noise.
+const SAME_EVENT = { submitted: ["filled"], autofilled: ["filled"], cancelled: ["cancelled"], expired: ["timeout"] };
 export function statusesAgree(outcome, status) {
   if (!outcome || !status) return true; // only one side knows — nothing to disagree about
   const same = SAME_EVENT[outcome];

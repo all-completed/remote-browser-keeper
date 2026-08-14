@@ -263,3 +263,24 @@ export function absTime(ts) {
   const d = toDate(ts);
   return d ? d.toLocaleString() : "";
 }
+
+// ---- Time left on a fill request --------------------------------------------
+// Always measured against the ABSOLUTE deadline main read off the frame (src/deadline.js),
+// never against when the window opened: the same frame is replayed to a keeper that
+// reconnects, so an arrival-based timer would show a fresh five minutes for a request with
+// seconds left (issue #12). Recomputing from `Date.now()` every tick is also what keeps the
+// label honest after the app is backgrounded or the device sleeps.
+export function remainingMs(expiresAt, now = Date.now()) {
+  if (!Number.isFinite(expiresAt)) return null; // no deadline known — show nothing
+  return Math.max(0, expiresAt - now);          // never negative
+}
+
+// "4:59" / "0:07", and h:mm:ss past the hour. Rounded UP, so it reads 0:00 only when the
+// time really is gone.
+export function formatRemaining(ms) {
+  const total = Math.ceil(Math.max(0, ms) / 1000);
+  const s = String(total % 60).padStart(2, "0");
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}

@@ -98,9 +98,12 @@ test("agreeing pairs do not raise a false disagreement", () => {
   assert.equal(statusesAgree("submitted", "filled"), true);
   assert.equal(statusesAgree("autofilled", "filled"), true);
   assert.equal(statusesAgree("cancelled", "cancelled"), true);
+  // Both sides watched the same deadline pass (issue #12): different word, same event.
+  assert.equal(statusesAgree("expired", "timeout"), true);
   assert.equal(statusesAgree("ui_failed", "cancelled"), false);
   assert.equal(statusesAgree("submitted", null), true); // only one side knows
   assert.equal(mergeHistory([local("a", "autofilled", iso(T))], [server("a", "filled", T)])[0].disagree, false);
+  assert.equal(mergeHistory([local("b", "expired", iso(T))], [server("b", "timeout", T)])[0].disagree, false);
 });
 
 test("sorted newest first across the two clocks (ISO local, epoch-seconds server)", () => {

@@ -10,6 +10,12 @@ contextBridge.exposeInMainWorld("keeper", {
   // window can never be on screen with nothing in it (issue #3).
   pendingRequest: () => ipcRenderer.invoke("keeper:pending-request"),
   rendered: (request_id) => ipcRenderer.send("keeper:prompt-rendered", { request_id }),
+  // The request's deadline passed (issue #12) — reported both ways, for the same reason
+  // the payload is pushed AND pulled: main's timer can be late on a machine that slept
+  // through it, the renderer's countdown can be up to a tick behind main, and whichever
+  // notices first must retire the prompt.
+  onExpired: (cb) => ipcRenderer.on("keeper:expired", (_e, m) => cb(m)),
+  reportExpired: (request_id) => ipcRenderer.send("keeper:prompt-expired", { request_id }),
   submit: (request_id, values) => ipcRenderer.send("keeper:submit", { request_id, values }),
   // `reason` is the user's optional plain-text note on a decline ("wrong account", "I did
   // it myself") — it IS shown to the agent, so it is never a value. Omitted on a plain tap.

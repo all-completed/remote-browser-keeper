@@ -4,6 +4,7 @@ import { getLatest, subscribe } from "../lib/promptBridge.js";
 import FieldRow from "../components/FieldRow.jsx";
 import CardPicker from "../components/CardPicker.jsx";
 import ProofImage from "../components/ProofImage.jsx";
+import Countdown from "../components/Countdown.jsx";
 import { Field } from "../components/Field.jsx";
 import { DECLINE_PRESETS, DECLINE_REASON_MAX, normalizeDeclineReason } from "../../src/declinereason.js";
 
@@ -17,8 +18,15 @@ export default function PromptApp() {
   const [dontAsk, setDontAsk] = useState(false); // auto-fill silently next time
   const [declining, setDeclining] = useState(false); // the "why?" panel is open
   const [note, setNote] = useState(""); // free-text decline reason (plain text, never a secret)
+  const [expired, setExpired] = useState(false); // the deadline passed — nothing left to answer
 
   useEffect(() => subscribe(setReq), []);
+
+  // Main retires the request at its deadline too (and closes this window shortly after);
+  // either side may notice first, so both flip the same state. See src/main.js expireRequest.
+  useEffect(() => {
+    try { window.keeper.onExpired?.(() => setExpired(true)); } catch { /* older preload */ }
+  }, []);
 
   // Tell main the request is actually on screen. Main shows the window only on this
   // report and treats its absence as a render failure, so a prompt that cannot paint can
@@ -55,6 +63,7 @@ export default function PromptApp() {
     setDontAsk(false);
     setDeclining(false);
     setNote("");
+    setExpired(false);
     if (!req) return;
     const reqFields = Array.isArray(req.fields) ? req.fields : [];
     // Generate a fresh strong value for any generate-field, and default to saving it.
@@ -139,7 +148,16 @@ export default function PromptApp() {
 
   const finish = () => setReq(null); // hide; main treats window-close as cancel only if no response sent
 
+  // The deadline passed while the prompt was open: tell main (it closes the window) and
+  // stop offering to send — the service resolved this request as `timeout` and would drop
+  // anything we sent now.
+  const onExpire = () => {
+    setExpired(true);
+    try { window.keeper.reportExpired?.(req.request_id); } catch { /* older preload */ }
+  };
+
   const send = async () => {
+    if (expired) return; // also guards Enter-to-submit from a field row
     if (pickedCardId && scope === "all") { try { window.keeper.rememberCardAllSites(req.request_id, pickedCardId); } catch {} }
     else if (pickedCardId && scope === "site") { try { window.keeper.rememberCardDomain(req.request_id, pickedCardId); } catch {} }
     const out = fields.map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
@@ -174,6 +192,8 @@ export default function PromptApp() {
             <div id="meta">
               <span id="session" className="chip">session: {req.session_id || "?"}</span>
               {req.url && <span className="chip url" title={req.url}>{shortUrl(req.url)}</span>}
+              {/* Nothing is drawn when the frame carried no deadline — see Countdown. */}
+              <Countdown expiresAt={req.expires_at} onExpire={onExpire} />
             </div>
           </div>
         </header>
@@ -227,12 +247,22 @@ export default function PromptApp() {
           )}
         </div>
 
-        <p id="note">Sent to the service and typed into the form for you. Never shown to the AI model.</p>
+        {expired ? (
+          <p id="expired">
+            This request expired — the service stopped waiting for it, so nothing was sent.
+            Ask the agent to request the fill again.
+          </p>
+        ) : (
+          <p id="note">Sent to the service and typed into the form for you. Never shown to the AI model.</p>
+        )}
 
         {/* Why the request is being declined — opened in place from the ▾ beside Cancel, so
             saying "wrong account" costs one extra tap and no navigation. Each preset
-            declines on its own click; the input is for anything the presets don't cover. */}
-        {declining && (
+            declines on its own click; the input is for anything the presets don't cover.
+            Gone once expired: the service already resolved the request as `timeout`, so a
+            reason would have nowhere to go — offering to explain a decline that cannot be
+            delivered is the same dead prompt in another shape. */}
+        {declining && !expired && (
           <div id="decline">
             <div id="presets">
               {DECLINE_PRESETS.map((p) => (
@@ -265,19 +295,24 @@ export default function PromptApp() {
 
         <div id="actions">
           <span id="declinegroup">
-            <button id="cancel" type="button" onClick={() => cancel()}>Cancel</button>
-            <button
-              id="why"
-              type="button"
-              aria-expanded={declining}
-              aria-label="Decline with a reason"
-              title="Decline with a reason"
-              onClick={() => setDeclining((v) => !v)}
-            >
-              ▾
-            </button>
+            <button id="cancel" type="button" onClick={() => cancel()}>{expired ? "Close" : "Cancel"}</button>
+            {/* The ▾ goes with Send once expired: there is no decline left to explain. */}
+            {!expired && (
+              <button
+                id="why"
+                type="button"
+                aria-expanded={declining}
+                aria-label="Decline with a reason"
+                title="Decline with a reason"
+                onClick={() => setDeclining((v) => !v)}
+              >
+                ▾
+              </button>
+            )}
           </span>
-          <button id="send" type="button" onClick={send}>Send</button>
+          {/* Removed rather than disabled once expired: a Send that quietly does nothing is
+              exactly the dead prompt this is meant to get rid of. */}
+          {!expired && <button id="send" type="button" onClick={send}>Send</button>}
         </div>
       </main>
     </>

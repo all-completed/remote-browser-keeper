@@ -36,9 +36,10 @@ remote-browser-keeper/
 | `config.js` | Resolves `{ baseUrl, apiKey }` — `RBS_URL` / default `https://rb.example.com`, and the API key from `AC_API_KEY` / `RBS_API_KEY` / `AC_API_KEY_FILE` / `~/.ac-api-key`. Also derives `keeperWsUrl`. |
 | `device.js` | This device's identity (`device.json` id, machine name, platform, app version) and the inert vault-state report sent on connect / shown in Settings — see [`device.json`](#devicejson--who-this-device-is). |
 | `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
+| `deadline.js` | Reads a request's **absolute deadline** off the `fill_request` frame (`expires_at`/`deadline`, or `created_at` + `timeout_s`); `null` when the frame carries none. Pure — the countdown and the expiry timer in `main.js` both hang off it. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
 | `declinereason.js` | The optional note a user attaches when **declining** (`DECLINE_PRESETS`, `DECLINE_REASON_MAX`, `normalizeDeclineReason`). Shared by the prompt UI and the main process, which re-normalizes whatever the renderer sends. Plain text meant for the agent — never a value. |
-| `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`. |
+| `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`, `onExpired`/`reportExpired`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
 
@@ -321,6 +322,7 @@ are already separated by base URL above.
 | `AC_API_KEY_FILE` | Path to a file holding the API key (e.g. `~/.ac-dev-api-key`). |
 | `~/.ac-api-key` | Default key file if none of the above is set. |
 | `KEEPER_TEST=1` | Force a test prompt on startup. |
+| `KEEPER_TEST_TIMEOUT_S` | Deadline of that test prompt, in seconds (default 300) — set it low to watch the countdown run out. |
 
 Running both environments at once (detached):
 

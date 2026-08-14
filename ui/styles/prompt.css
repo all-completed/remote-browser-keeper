@@ -57,6 +57,11 @@ body {
   max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chip.url { color: var(--primary-hi); text-decoration: none; }
+/* Time left before the service gives up on the request: amber under 30s, red once it is
+   gone. Tabular figures so the digits don't jitter as they count down. */
+.chip.timeleft { color: var(--text); font-variant-numeric: tabular-nums; }
+.chip.timeleft.soon { color: #FCD34D; border-color: rgba(252, 211, 77, 0.35); }
+.chip.timeleft.gone { color: #FCA5A5; border-color: rgba(248, 113, 113, 0.35); }
 
 #message {
   margin: 0 0 14px; padding: 10px 12px; font-size: 12.5px; line-height: 1.45;
@@ -79,6 +84,14 @@ body {
 .cardPicker { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 
 #note { font-size: 11px; color: var(--muted2); margin: 11px 0 14px; line-height: 1.45; }
+/* Takes the place of #note once the request has expired — the window closes a few seconds
+   later, and this is where the user finds out why. */
+#expired {
+  font-size: 12px; line-height: 1.45; margin: 11px 0 14px; padding: 9px 11px;
+  color: #FECACA; background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.28); border-left: 3px solid #F87171;
+  border-radius: 10px;
+}
 
 /* Decline-with-a-reason panel (issue #11): presets first — the common declines are one
    tap — then free text for everything else. Plain text, styled nothing like a secret
@@ -113,6 +126,9 @@ button { font-size: 13px; padding: 9px 16px; border-radius: 9px; cursor: pointer
 #cancel { background: var(--chip-bg); color: var(--text); border: 1px solid var(--border2); }
 #cancel:hover { border-color: var(--muted2); }
 #declinegroup #cancel { border-radius: 9px 0 0 9px; border-right: none; }
+/* Once expired the ▾ is gone (there is no decline left to explain), so Close is a whole
+   button again — without this it keeps the split-button's flat, border-less right edge. */
+#declinegroup #cancel:only-child { border-radius: 9px; border-right: 1px solid var(--border2); }
 #why {
   padding: 9px 10px; border-radius: 0 9px 9px 0; font-size: 11px; line-height: 1;
   background: var(--chip-bg); color: var(--muted); border: 1px solid var(--border2);
