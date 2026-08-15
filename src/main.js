@@ -21,6 +21,7 @@ import { loadSettings, saveSettings } from "./settings.js";
 import { mergeHistory } from "./historymerge.js";
 import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
 import { normalizeDeclineReason } from "./declinereason.js";
+import { requestDeadline } from "./deadline.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -124,7 +125,7 @@ function recordHistory(req, outcome, reason) {
       url: req.url || null,
       requested_at: req._requested_at || null, // when the request arrived (ISO)
       resolved_at: now.toISOString(),
-      outcome, // "submitted" (user sent values) | "cancelled"
+      outcome, // "submitted" (user sent values) | "cancelled" | "autofilled" | "ui_failed" | "expired"
       ...(reason ? { reason } : {}), // why it was declined, when the user said
       screenshot: hasShot ? "screenshots/" + req.request_id + ".jpg" : null,
       fields: (Array.isArray(req.fields) ? req.fields : []).map((f) => ({
@@ -222,11 +223,20 @@ function connect() {
     if (msg.type === "fill_request" && msg.request_id) {
       if (pending.has(msg.request_id)) return; // dedup: server replays pending on reconnect
       msg._requested_at = new Date().toISOString();
+      msg._expires_at = requestDeadline(msg); // absolute, off the frame — null if not on the wire
+      // A replay can carry a request the service has already given up on. Asking the user
+      // for a value nobody is waiting for (or auto-filling one) only wastes the secret.
+      if (msg._expires_at != null && msg._expires_at <= Date.now()) {
+        console.log("[keeper] fill_request", msg.request_id, "arrived past its deadline — not shown");
+        recordHistory(msg, "expired");
+        return;
+      }
       if (tryAutofillCard(msg)) return; // answered from a saved card; no prompt
       if (tryAutofillGenerate(msg)) return; // generate-only request → create + fill, no prompt
       if (tryAutofillFields(msg)) return; // every field saved with "don't ask again"
       pending.set(msg.request_id, msg);
       queue.push(msg.request_id);
+      armExpiry(msg);
       showNextPrompt();
     }
   });
@@ -500,6 +510,9 @@ function showNextPrompt() {
     url: req.url || null,           // page URL being filled
     message: req.message || null,   // LLM's explanation of why
     screenshot: req.screenshot || null, // single proof image for the request
+    // Absolute deadline (epoch ms) or null when the frame carried none — the renderer
+    // counts down to this moment, and shows no countdown at all when it is null.
+    expires_at: req._expires_at ?? null,
     fields,                         // [{selector,label,field,length,format}]
     cards: cardOpts,                // [{id,isDefault}] for the saved-card picker
     host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
@@ -584,7 +597,10 @@ ipcMain.handle("keeper:pending-request", (e) => {
 // "the user did not answer", so an automation can stop instead of retrying a login into
 // an account lockout.
 function failPrompt(requestId, reason) {
-  if (!promptState || promptState.requestId !== requestId || promptState.rendered) return;
+  // `expired` is not a render failure: the request ran out of time while the window was
+  // still coming up, and expireRequest has already dealt with it (issue #12).
+  if (!promptState || promptState.requestId !== requestId || promptState.rendered || promptState.expired) return;
+  clearExpiry(requestId);
   console.error("[keeper] approval window failed to render:", reason, "— request", requestId);
   if (CONTENT_PROTECTION) {
     console.error("[keeper] screen-capture protection is ON for this window;"
@@ -629,6 +645,7 @@ function focusRequest(requestId) {
 
 function resolveRequest(requestId, payload) {
   if (!pending.has(requestId)) return;
+  clearExpiry(requestId);
   recordHistory(pending.get(requestId), payload.cancelled ? "cancelled" : "submitted", payload.reason);
   safeSend({ type: "fill_response", request_id: requestId, ...payload });
   pending.delete(requestId);
@@ -644,12 +661,73 @@ function resolveRequest(requestId, payload) {
 function dismissRequest(requestId) {
   if (!pending.has(requestId) && queue.indexOf(requestId) === -1) return; // not ours / already gone
   const wasCurrent = queue[0] === requestId;
+  clearExpiry(requestId);
   pending.delete(requestId);
   const i = queue.indexOf(requestId);
   if (i !== -1) queue.splice(i, 1);
   if (wasCurrent && promptWin) { const w = promptWin; promptWin = null; w.close(); }
   showNextPrompt();
 }
+
+// ---------- Request deadline (issue #12) ----------
+// The service stops waiting DEFAULT_FILL_TIMEOUT_S after it created the request and marks
+// it `timeout`. The Keeper follows the SAME absolute moment (deadline.js reads it off the
+// frame; there is no countdown when the frame doesn't carry one), so a prompt cannot
+// outlive the request it belongs to and sit there looking answerable.
+const EXPIRED_LINGER_MS = 6000; // an expired prompt says why, then closes itself
+const expiryTimers = new Map(); // request_id -> timeout
+
+function armExpiry(req) {
+  if (!req || req._expires_at == null) return; // no deadline on the wire → nothing to arm
+  clearExpiry(req.request_id);
+  expiryTimers.set(req.request_id, setTimeout(
+    () => expireRequest(req.request_id),
+    Math.max(0, req._expires_at - Date.now()),
+  ));
+}
+
+function clearExpiry(requestId) {
+  const t = expiryTimers.get(requestId);
+  if (t) { clearTimeout(t); expiryTimers.delete(requestId); }
+}
+
+// The deadline passed. Like dismissRequest we send NO fill_response — the service already
+// resolved this request as `timeout` and is not listening. What is different is that the
+// user may be looking at the open prompt: it is told it expired (the renderer's countdown
+// hits zero at the same moment) and closes itself a few seconds later, rather than staying
+// up as a prompt that silently does nothing when used.
+function expireRequest(requestId) {
+  clearExpiry(requestId);
+  const req = pending.get(requestId);
+  if (!req) return; // already answered, dismissed, or never ours
+  console.log("[keeper] request expired (deadline passed) —", requestId);
+  recordHistory(req, "expired");
+  pending.delete(requestId);
+  const i = queue.indexOf(requestId);
+  if (i !== -1) queue.splice(i, 1);
+  const current = promptState && promptState.requestId === requestId && promptWin && !promptWin.isDestroyed();
+  if (!current) { showNextPrompt(); return; } // showNextPrompt refreshes the tray
+  // Stand the render watchdog down: a window whose request expired before it painted did
+  // not fail to render, and must not be reported as a broken approval UI.
+  promptState.expired = true;
+  if (promptState.timer) { clearTimeout(promptState.timer); promptState.timer = null; }
+  const w = promptWin;
+  try { w.webContents.send("keeper:expired", { request_id: requestId }); } catch { /* it is closing anyway */ }
+  setTimeout(() => { if (!w.isDestroyed()) w.close(); }, EXPIRED_LINGER_MS);
+  updateTray(); // it is out of the queue already; the window is only saying goodbye
+}
+
+// The renderer's countdown reached zero. It reads the wall clock, so it notices a deadline
+// that passed while the machine was asleep before our own timer does (a monotonic timer
+// does not tick through suspend). Verified against main's own copy of the deadline, so the
+// renderer can never retire a request early.
+ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win !== promptWin || !promptState || promptState.requestId !== request_id) return;
+  const req = pending.get(request_id);
+  if (!req || req._expires_at == null || Date.now() < req._expires_at) return;
+  expireRequest(request_id);
+});
 
 ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
@@ -659,7 +737,18 @@ ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
 // "I did it myself" instead of guessing. Normalized here as well as in the renderer — main
 // is the authority on what goes on the wire — and omitted entirely when there is none, so
 // a plain one-tap Cancel sends byte-for-byte what it always did.
-ipcMain.on("keeper:cancel", (_e, { request_id, reason } = {}) => {
+ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
+  // An expired request is already out of `pending`: there is nothing left to answer, but
+  // the window must still close when the user dismisses it — resolveRequest would no-op
+  // and leave a window nobody can get rid of. This does NOT swallow a decline reason: the
+  // guard only fires when the request is already gone (expired / answered / dismissed
+  // elsewhere), and resolveRequest's own `pending` check would have dropped it anyway. A
+  // live request still falls through to the full reason path below.
+  if (!pending.has(request_id)) {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win && !win.isDestroyed()) win.close();
+    return;
+  }
   const note = normalizeDeclineReason(reason);
   resolveRequest(request_id, note ? { cancelled: true, reason: note } : { cancelled: true });
 });
@@ -1303,8 +1392,17 @@ app.whenReady().then(() => {
 
   if (process.env.KEEPER_TEST === "1") {
     const id = "test-" + Date.now();
-    pending.set(id, { request_id: id, session_id: "demo", label: "Password for example.com (TEST)", field: "password" });
+    // Same shape the service sends, deadline included, so the countdown and its expiry can
+    // be exercised without one: KEEPER_TEST_TIMEOUT_S=20 watches a prompt run out.
+    const secs = Number(process.env.KEEPER_TEST_TIMEOUT_S) || 300;
+    const req = {
+      request_id: id, session_id: "demo", label: "Password for example.com (TEST)", field: "password",
+      expires_at: new Date(Date.now() + secs * 1000).toISOString(),
+    };
+    req._expires_at = requestDeadline(req);
+    pending.set(id, req);
     queue.push(id);
+    armExpiry(req);
     showNextPrompt();
   }
 });

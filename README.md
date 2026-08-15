@@ -70,8 +70,12 @@ Server → keeper:
   "selector": "#password", "label": "Password", "field": "password",
   "url": "https://web.telegram.org/k/",
   "message": "Logging into Telegram to read your unread chats",
+  "expires_at": "2026-08-14T12:05:00Z",
   "screenshot": "data:image/jpeg;base64,…" }
 ```
+`expires_at` is **optional, and the service does not send it yet** — see
+[Time left](#time-left) for what the Keeper does with it, and what it does without it.
+
 Keeper → server:
 ```json
 { "type": "fill_response", "request_id": "uuid", "value": "..." }
@@ -142,6 +146,29 @@ Server → keeper (liveness): `{ "type": "ping" }`.
 
 The agent calls `request_fill` (returns a `request_id`, status `pending`) and polls
 `get_fill_status` until `filled` / `cancelled` / `timeout` / `error`.
+
+### Time left
+
+A request is not open-ended: the service waits `DEFAULT_FILL_TIMEOUT_S` (300s) and then
+resolves it as `timeout`. The prompt therefore shows **how long is left**, counting down,
+and retires itself when the time is up (it says so, then closes) instead of staying on
+screen as a prompt that silently does nothing.
+
+The remaining time is derived **only** from an absolute deadline on the wire, never from
+when the frame arrived — the service **replays the same frame verbatim** to a keeper that
+reconnects, so a phone woken by a push would start a fresh 5:00 on a request with thirty
+seconds left, and a countdown that lies is worse than none. The Keeper accepts, in order:
+
+| On the frame | Meaning |
+| --- | --- |
+| `expires_at` (or `deadline`) | the moment itself — ISO-8601, epoch seconds, or epoch millis |
+| `created_at` + `timeout_s` | when the service started waiting, plus how long it waits |
+
+A relative field (`expires_in`, `ttl`) is deliberately **ignored**: it is stale the moment
+the frame is replayed. **Without either form the Keeper shows no countdown at all** — an
+unknown deadline stays unknown rather than being invented. That is where things stand
+today: the service sends neither, so the countdown appears only once `expires_at` is added
+to `fill_request` server-side. See `src/deadline.js`.
 
 ## Security properties
 
