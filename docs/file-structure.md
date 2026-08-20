@@ -35,6 +35,8 @@ remote-browser-keeper/
 | `main.js` | The whole main process: tray-only lifecycle (dock hidden), the **Keeper WebSocket client** (connect/reconnect, `hello`/`ping`/`pong`, receive `fill_request`, send `fill_response`), the **prompt-window queue**, the **History window**, the **full-size image viewer**, the **tray menu** (service host + connection state, History…, Quit), and **local history + screenshot storage** (see below). |
 | `config.js` | Resolves `{ baseUrl, apiKey }` — `RBS_URL` / default `https://rb.example.com`, and the API key from `AC_API_KEY` / `RBS_API_KEY` / `AC_API_KEY_FILE` / `~/.ac-api-key`. Also derives `keeperWsUrl`. |
 | `device.js` | This device's identity (`device.json` id, machine name, platform, app version) and the inert vault-state report sent on connect / shown in Settings — see [`device.json`](#devicejson--who-this-device-is). |
+| `enroll.js` | Trading the shared account key for a token of this device's own (issue #15): when to ask, what a service's answer means, and when a token has been revoked. Electron-free so the decision table is unit-tested. |
+| `devicetoken.js` | Where that token lives — `device-token.json`, OS-encrypted like the card store, per base URL. Never touches the account key. |
 | `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
 | `deadline.js` | Reads a request's **absolute deadline** off the `fill_request` frame (`expires_at`/`deadline`, or `created_at` + `timeout_s`); `null` when the frame carries none. Pure — the countdown and the expiry timer in `main.js` both hang off it. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
@@ -104,6 +106,7 @@ prod Keeper keep separate stores automatically:
     ├── secrets.json                    # session-unlock secrets (by secret_id)
     │                                   # (no cards.json — saved cards live only in the synced vault)
     ├── device.json                     # this device's stable id (non-secret label)
+    ├── device-token.json               # 🔒 this device's OWN service token, if enrolled
     ├── fields.json                     # "forever" saved field values (this device only)
     ├── vault.json                      # "vault" saved fields — local cache of the synced vault
     ├── screenshots/
@@ -248,6 +251,39 @@ zip, state, country } } } }`.
 > the CVV at rest, omit it and the Keeper prompts for it. (Secrets — `secrets.json` —
 > stay a filesystem vault for now; they're provisioned by an external script. See the
 > service repo `docs/TODO.md`.)
+
+### `device-token.json` — this device's own service token (issue #15)
+
+`~/.remote-browser-keeper/<base-url>/device-token.json`, OS-encrypted at rest exactly
+like `cards.json`, holding `{token, device_id, secret_bound, enrolled_at}`.
+
+Before per-device tokens, every Keeper on an account presented the *same* key, so a
+device's identity was whatever it claimed in `hello`, and cutting one device off meant
+rotating the account key — cutting off every other device and every script too. The
+service now mints one token per device (service repo issue #33); on connect the Keeper
+asks for one (`POST /api/keeper/devices/enroll`) and uses it from then on.
+
+Three properties are deliberate and load-bearing:
+
+- **Additive, never a cut.** The account key keeps working forever. A service that
+  predates the feature answers 404/503, which is capability negotiation, not an error —
+  the Keeper says so once and stays on the account key. Any doubt about the device token
+  (revoked, unreadable, service can't see the record) falls back to the account key.
+- **Per base URL**, like the vault key: a dev Keeper and a prod Keeper on one machine are
+  two devices with two tokens.
+- **Header only.** The service refuses device tokens presented as `?api_key=` precisely
+  so they cannot leak through access logs; the Keeper sends it as `Authorization: Bearer`
+  on the WS handshake, never in a URL.
+
+> ⚠️ **Plaintext gap:** `securestore` falls back to a chmod-600 plaintext file where no OS
+> secret backend exists (headless Linux without libsecret). That is the same exposure the
+> card store already has, and it is not solved by this ticket — on such a host the device
+> token is no worse protected than the account key in `~/.ac-api-key`, but no better.
+
+Revoked from the Devices page, the service hangs up the socket (close 1008) or refuses
+the upgrade (401). The Keeper drops the token, reconnects on the account key, and
+re-enrolls once; if the replacement is refused too it stops trying for the run rather
+than looping. The **Auth** row in Settings names which credential is live.
 
 ### `vault.json` — the synced vault (saved fields across devices)
 

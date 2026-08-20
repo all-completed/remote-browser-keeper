@@ -50,6 +50,25 @@ function loadOrCreateId(baseUrl) {
   return id;
 }
 
+// Adopt the id the service assigned at enrollment (issue #15).
+//
+// Before enrolling, the id is ours and self-declared; after, the service ignores what we
+// claim and uses the one bound to the token. Writing it back here keeps the two in step,
+// so this device's `hello` names the same record the user sees — and revokes — on the
+// Devices page. A no-op when the id is already ours.
+export function adoptDeviceId(baseUrl, id) {
+  if (typeof id !== "string" || !id) return false;
+  const p = devicePath(baseUrl);
+  try {
+    if (loadOrCreateId(baseUrl) === id) return false;
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ id }, null, 2));
+    return true;
+  } catch {
+    return false;  // unwritable home: we still connect, just under the old label
+  }
+}
+
 // Who this device is: { id, name, platform, app_version }.
 export function deviceIdentity(baseUrl) {
   return {
