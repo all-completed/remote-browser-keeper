@@ -15,7 +15,9 @@ import { available as secureStorageAvailable } from "./securestore.js";
 import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as forgetAllFields, localVaultMap, mergeRemoteVault } from "./fieldstore.js";
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
-import { buildDeviceReport } from "./device.js";
+import { buildDeviceReport, adoptDeviceId } from "./device.js";
+import { enrollDevice, pickCredential, isRevocationSignal, enrollmentState, shouldEnroll } from "./enroll.js";
+import { loadDeviceToken, loadDeviceEnrollment, saveDeviceToken, clearDeviceToken } from "./devicetoken.js";
 import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { mergeHistory } from "./historymerge.js";
@@ -184,14 +186,19 @@ const queue = []; // request_ids waiting for the prompt window
 // ---------- Keeper WebSocket ----------
 function connect() {
   const cfg = loadConfig();
-  if (!cfg.apiKey) {
+  // This device's own token when it has one, else the shared account key — which is
+  // exactly today's behaviour, and stays the fallback forever (issue #15).
+  const cred = pickCredential({ deviceToken: loadDeviceToken(cfg.baseUrl), apiKey: cfg.apiKey });
+  credentialKind = cred.kind;
+  if (!cred.token) {
     console.warn("[keeper] no API key (AC_API_KEY / ~/.ac-api-key); will retry");
   }
   const url = keeperWsUrl(cfg);
   // Token goes in the Authorization header, NOT the URL, so it never leaks into
-  // proxy/access logs. (Node's ws client supports request headers.)
+  // proxy/access logs. (Node's ws client supports request headers.) The service refuses
+  // device tokens on the query string outright, so the header is the only way for one.
   ws = new WebSocket(url, {
-    headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {},
+    headers: cred.token ? { Authorization: `Bearer ${cred.token}` } : {},
   });
 
   ws.on("open", () => {
@@ -205,9 +212,13 @@ function connect() {
     lastSentReport = JSON.stringify(report);
     startHeartbeat();
     updateTray();
-    console.log("[keeper] connected");
+    console.log("[keeper] connected" + (credentialKind === "device" ? " (device token)" : ""));
     // Pull any vault entries saved on another paired device (and push ours).
     void syncVaultNow();
+    // Now that the link is proven, see whether this service can give this device a
+    // credential of its own. Deliberately after connecting, never before: a Keeper that
+    // works today must not be held up by an endpoint that may not exist.
+    void maybeEnroll();
   });
 
   ws.on("message", (data) => {
@@ -241,7 +252,19 @@ function connect() {
     }
   });
 
-  ws.on("close", () => { connected = false; stopHeartbeat(); updateTray(); scheduleReconnect(); });
+  ws.on("close", (code, reasonBuf) => {
+    connected = false;
+    stopHeartbeat();
+    handleAuthClose({ code, reason: reasonBuf ? reasonBuf.toString() : "" });
+    updateTray();
+    scheduleReconnect();
+  });
+  // A rejected upgrade (401) surfaces here, not as a close frame, and carries the
+  // service's status — which is how we tell "token revoked" from "network is down".
+  ws.on("unexpected-response", (_req, res) => {
+    handleAuthClose({ httpStatus: res.statusCode, reason: res.statusMessage || "" });
+    try { res.destroy(); } catch {}
+  });
   ws.on("error", (e) => { console.warn("[keeper] ws error", e.message); try { ws.close(); } catch {} });
 }
 
@@ -268,6 +291,76 @@ function startHeartbeat() {
 
 function stopHeartbeat() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+}
+
+// ---------- Device enrollment (issue #15) ----------
+// Which credential the live socket is using, and how enrollment is going on this run.
+let credentialKind = "none";        // "device" | "account" | "none"
+let rejectedTokens = 0;             // device tokens the service refused this run
+const enrollState = enrollmentState();
+
+// Ask the service, once the socket is up, for a token belonging to this device alone.
+//
+// Everything about this is best-effort by design. A service that predates #33 answers
+// 404, one without a metadata store answers 503, and either way we say so once and keep
+// using the account key — which is not a degraded mode, it is the mode every Keeper has
+// always run in. Nothing here can leave the app worse off than not calling it.
+async function maybeEnroll() {
+  const cfg = loadConfig();
+  if (!shouldEnroll(enrollState, {
+    hasDeviceToken: !!loadDeviceToken(cfg.baseUrl),
+    hasApiKey: !!cfg.apiKey,
+  })) return;
+  enrollState.lastAttempt = Date.now();
+  enrollState.attempts += 1;
+  const identity = (deviceReport().device) || {};
+  const res = await enrollDevice({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, identity });
+  if (!res.ok) {
+    enrollState.lastError = res.reason;
+    if (res.reason === "unsupported") {
+      enrollState.supported = false;
+      console.log("[keeper] service has no device enrollment; staying on the account key");
+    } else {
+      console.warn("[keeper] device enrollment failed (" + res.reason + "); staying on the account key");
+    }
+    return;
+  }
+  enrollState.supported = true;
+  saveDeviceToken(cfg.baseUrl, { token: res.token, deviceId: res.deviceId, secretBound: res.secretBound });
+  // The service is the authority on this device's id from here on; match it so our
+  // `hello` names the record the user revokes on the Devices page.
+  if (adoptDeviceId(cfg.baseUrl, res.deviceId)) deviceReport({ refresh: true });
+  if (!res.secretBound) {
+    // Enrolled without inheriting an encryption secret: fills still work, but this
+    // device cannot be the key authority for NEW encrypted sessions. Worth saying out
+    // loud rather than discovering it at the first encrypted open.
+    console.warn("[keeper] device token carries no encryption secret; new encrypted sessions may not bind to it");
+  }
+  console.log("[keeper] enrolled as device", res.deviceId || "(unnamed)", "— reconnecting with its own token");
+  // Reconnect so the socket itself is authenticated by the new token, which is what
+  // makes this device's identity proven rather than self-declared.
+  try { if (ws) ws.close(); } catch {}
+}
+
+// The service refused, or hung up on, a socket we authenticated with a device token.
+// That is a revoke (or a record this deployment can't see) — drop the token and let the
+// next reconnect go out on the account key. Falling back rather than retrying is the
+// difference between "re-enrolls on its own" and the silent auth-failure loop the issue
+// rules out; the account key still works, so the user sees a working Keeper.
+function handleAuthClose({ httpStatus = 0, code = 0, reason = "" } = {}) {
+  if (!isRevocationSignal({ kind: credentialKind, httpStatus, code, reason })) return;
+  const cfg = loadConfig();
+  clearDeviceToken(cfg.baseUrl);
+  credentialKind = cfg.apiKey ? "account" : "none";
+  // Allow one immediate re-enrollment attempt: if the user revoked to re-pair, this
+  // device comes back with a fresh token instead of sitting on the shared key. Only
+  // once, though — a service that mints tokens it then rejects would otherwise have us
+  // spinning enroll/reject forever, and the account key works fine meanwhile.
+  rejectedTokens += 1;
+  if (rejectedTokens < 2) enrollState.lastAttempt = 0;
+  else enrollState.supported = false;
+  console.warn("[keeper] device token rejected ("
+    + (httpStatus ? "HTTP " + httpStatus : "close " + code) + "); falling back to the account key");
 }
 
 function scheduleReconnect() {
@@ -1069,7 +1162,21 @@ ipcMain.handle("keeper:device-info", () => {
   try {
     const report = deviceReport();
     if (!report.device) return { ok: false, error: "device report unavailable" };
-    return { ok: true, ...report };
+    // How this device authenticates, so "enrolled" vs "sharing the account key" is
+    // visible without reading logs. Never the token itself — only that one exists.
+    const enr = loadDeviceEnrollment(loadConfig().baseUrl);
+    return {
+      ok: true,
+      ...report,
+      auth: {
+        kind: credentialKind,
+        enrolled: !!enr.token,
+        enrolled_at: enr.enrolledAt || null,
+        secret_bound: enr.secretBound,
+        // null = not asked yet this run; false = the service has no such endpoint.
+        enrollment_supported: enrollState.supported,
+      },
+    };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
