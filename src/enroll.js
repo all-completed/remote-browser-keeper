@@ -68,10 +68,31 @@ export function pickCredential({ deviceToken, apiKey } = {}) {
 // The reason text is only corroboration; the service is free to reword it, and a rejected
 // upgrade delivers a bare status line with no detail at all.
 export function isRevocationSignal({ kind = "", httpStatus = 0, code = 0, reason = "" } = {}) {
-  if (kind !== "device") return false;
-  if (httpStatus === 401 || httpStatus === 403) return true;
-  if (code === 1008) return true;
-  return /revoke|not enrolled/i.test(String(reason || ""));
+  return classifyAuthFailure({ kind, httpStatus, code, reason }) !== "none";
+}
+
+// How many consecutive refused upgrades before we believe the token is really gone.
+export const REFUSALS_BEFORE_DISCARD = 3;
+
+// ...and WHICH of the two it is, because they must not be answered the same way.
+//
+//   "revoked" — definitive. The service hung up a socket that was already OPEN, with
+//               1008, and it does that only where the user revoked this device
+//               (remote-browser-service server/api/keeper.py:387).
+//   "refused" — the UPGRADE was refused with 401 "Device token is not enrolled". That is
+//               ambiguous BY DESIGN: the service fails closed when it cannot read its
+//               device records — "a transient Auth0 outage costs a retry, not a bad
+//               grant" (server/main.py:180-198) — and that path emits exactly the same
+//               401 as a revoke. Discarding the token on the first one turns the retry
+//               the service is counting on into a permanent loss of this device's
+//               credential, plus a fresh record against a fleet capped at 8.
+//   "none"    — not about our device token at all.
+export function classifyAuthFailure({ kind = "", httpStatus = 0, code = 0, reason = "" } = {}) {
+  if (kind !== "device") return "none";
+  if (code === 1008 || /revoke/i.test(String(reason || ""))) return "revoked";
+  if (httpStatus === 401 || httpStatus === 403) return "refused";
+  if (/not enrolled/i.test(String(reason || ""))) return "refused";
+  return "none";
 }
 
 // The in-memory record of where enrollment stands this run. Deliberately NOT persisted:

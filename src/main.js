@@ -16,7 +16,7 @@ import { getSaved, saveValue, forget as forgetField, listSaved, forgetAll as for
 import { syncVault, pullVault, putVault, emptyVault, generateVaultKey, userVaultKey, decryptLegacyV1, legacyV1SecretId, FORMAT_V1, VaultKeyMismatch } from "./vault.js";
 import { loadVaultKey, saveVaultKey, ensureVaultKey, vaultKeyForPairing } from "./vaultkey.js";
 import { buildDeviceReport, adoptDeviceId } from "./device.js";
-import { enrollDevice, pickCredential, isRevocationSignal, enrollmentState, shouldEnroll } from "./enroll.js";
+import { enrollDevice, pickCredential, classifyAuthFailure, enrollmentState, shouldEnroll, REFUSALS_BEFORE_DISCARD } from "./enroll.js";
 import { loadDeviceToken, loadDeviceEnrollment, saveDeviceToken, clearDeviceToken } from "./devicetoken.js";
 import { generateSharedValues, isNumericField } from "./genpassword.js";
 import { loadSettings, saveSettings } from "./settings.js";
@@ -212,6 +212,7 @@ function connect() {
     lastSentReport = JSON.stringify(report);
     startHeartbeat();
     updateTray();
+    if (credentialKind === "device") refusedUpgrades = 0; // this token still works
     console.log("[keeper] connected" + (credentialKind === "device" ? " (device token)" : ""));
     // Pull any vault entries saved on another paired device (and push ours).
     void syncVaultNow();
@@ -308,7 +309,23 @@ function stopHeartbeat() {
 // Which credential the live socket is using, and how enrollment is going on this run.
 let credentialKind = "none";        // "device" | "account" | "none"
 let rejectedTokens = 0;             // device tokens the service refused this run
+let refusedUpgrades = 0;            // consecutive refusals of the CURRENT token
 const enrollState = enrollmentState();
+
+// The credential the HTTP API sees — the same precedence as the socket, for the same
+// reason. Once this device has a token of its own, that token is what proves who it is,
+// and it keeps working after the account key is rotated; leaving the HTTP calls on the
+// account key would let the Keeper look perfectly connected while the vault, the server
+// history and the screenshots quietly 401. The service accepts a device token from a
+// header (server/main.py:367-374 on remote-browser-service@7f4e984) and deliberately
+// never from a query param, which is where these calls already put it.
+//
+// NOT used by the pair-phone QR: that hands a *different* device a credential, and this
+// device's own token is precisely what must not travel.
+function apiConn(cfg) {
+  const cred = pickCredential({ deviceToken: loadDeviceToken(cfg.baseUrl), apiKey: cfg.apiKey });
+  return { baseUrl: cfg.baseUrl, apiKey: cred.token };
+}
 
 // Ask the service, once the socket is up, for a token belonging to this device alone.
 //
@@ -359,7 +376,23 @@ async function maybeEnroll() {
 // difference between "re-enrolls on its own" and the silent auth-failure loop the issue
 // rules out; the account key still works, so the user sees a working Keeper.
 function handleAuthClose({ httpStatus = 0, code = 0, reason = "" } = {}) {
-  if (!isRevocationSignal({ kind: credentialKind, httpStatus, code, reason })) return;
+  const verdict = classifyAuthFailure({ kind: credentialKind, httpStatus, code, reason });
+  if (verdict === "none") return;
+  // A refused UPGRADE is not proof of a revoke: the service rejects a device token
+  // whenever it cannot READ its device records, on purpose, expecting us to retry
+  // (server/main.py:180-198 "a transient Auth0 outage costs a retry, not a bad grant").
+  // Its in-process record cache does not survive a deploy, and Auth0's user-search is
+  // eventually consistent, so this is a real event, not a thought experiment. Present
+  // the same token again a couple of times before concluding the record is gone —
+  // otherwise one blip costs this device its credential and burns one of the eight
+  // records the account is allowed, evicting the least-recently-seen real device.
+  if (verdict === "refused" && ++refusedUpgrades < REFUSALS_BEFORE_DISCARD) {
+    console.warn("[keeper] device token refused (HTTP " + httpStatus + ") — retrying it ("
+      + refusedUpgrades + "/" + REFUSALS_BEFORE_DISCARD + ")");
+    reconnectDelay = 1000;
+    return;
+  }
+  refusedUpgrades = 0;
   const cfg = loadConfig();
   clearDeviceToken(cfg.baseUrl);
   credentialKind = cfg.apiKey ? "account" : "none";
@@ -427,6 +460,13 @@ async function resolveVaultKey(cfg) {
     const res = await fetch(cfg.baseUrl.replace(/\/+$/, "") + "/api/vault", { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
     status = res.status;
     if (res.ok) body = await res.json();
+    else if (status === 401 || status === 403) {
+      // Not transient, and not silent: the socket may well be up on a device token
+      // while the credential these calls carry is dead. Say so, or the vault just
+      // stops syncing behind a tray icon that reads "connected".
+      console.warn("[keeper] vault: the service rejected our credential (HTTP " + status + ")");
+      return { transient: true };
+    }
     else if (status !== 404) return { transient: true };
   } catch { return { transient: true }; }
   if (status === 404 || !body) return { key: saveVaultKey(cfg.baseUrl, generateVaultKey()) }; // brand-new
@@ -464,10 +504,11 @@ async function syncVaultNow() {
   if (vaultSyncing) return;
   let cfg;
   try { cfg = loadConfig(); } catch { return; }
-  if (!cfg.apiKey) return;
+  const conn = apiConn(cfg);
+  if (!conn.apiKey) return;
   vaultSyncing = true;
   try {
-    const r = await resolveVaultKey(cfg);
+    const r = await resolveVaultKey(conn);
     if (r.transient) return;
     if (r.repair) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault: this device needs to re-pair to get the vault password");
@@ -477,7 +518,7 @@ async function syncVaultNow() {
     }
     vaultNeedsRepair = false;
     await syncVault(
-      { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
+      conn,
       r.key,
       (remoteBlob) => mergeVaultBlob(cfg.baseUrl, remoteBlob),
       { onVersion: (v) => { vaultLastVersion = v; } },
@@ -946,7 +987,7 @@ async function sendHistory() {
   const seq = ++historySeq;
   pushHistory({ items: mergeHistory(readHistory(), []), server: { state: "loading" } });
   let r;
-  try { r = await fetchServerHistory(loadConfig()); }
+  try { r = await fetchServerHistory(apiConn(loadConfig())); }
   catch (e) { r = { ok: false, requests: [], error: e.message }; } // loadConfig threw
   if (seq !== historySeq || !historyWin) return;
   pushHistory({
@@ -965,7 +1006,7 @@ ipcMain.handle("history:screenshot", async (_e, id) => {
   try {
     return "data:image/jpeg;base64," + fs.readFileSync(screenshotFile(sid)).toString("base64");
   } catch { /* not on this device — the service may still hold the proof */ }
-  try { return await fetchServerScreenshot(loadConfig(), sid); } catch { return null; }
+  try { return await fetchServerScreenshot(apiConn(loadConfig()), sid); } catch { return null; }
 });
 
 // ---------- Cards window (manage saved cards for auto-fill) ----------
@@ -1200,11 +1241,11 @@ ipcMain.handle("keeper:device-info", () => {
 ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
   try {
     const cfg = loadConfig();
-    if (!cfg.apiKey) return { ok: false, error: "No API key configured." };
+    const conn = apiConn(cfg);
+    if (!conn.apiKey) return { ok: false, error: "No API key configured." };
     const pw = String(password || "");
     if (pw.length < 8) return { ok: false, error: "Use at least 8 characters." };
     if (vaultNeedsRepair) return { ok: false, error: "This device is out of sync — re-pair it first." };
-    const conn = { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
     const oldKey = loadVaultKey(cfg.baseUrl) || ensureVaultKey(cfg.baseUrl);
     let current;
     try { current = await pullVault(conn, oldKey); }
