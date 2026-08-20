@@ -7,6 +7,7 @@ import {
   classifyEnrollStatus,
   pickCredential,
   isRevocationSignal,
+  classifyAuthFailure,
   enrollmentState,
   shouldEnroll,
   enrollDevice,
@@ -38,6 +39,20 @@ test("a 401 on the ACCOUNT key never discards a device token", () => {
   // silently un-enroll a device every time the network hiccuped.
   assert.equal(isRevocationSignal({ kind: "device", code: 1006 }), false);
   assert.equal(isRevocationSignal({ kind: "device", code: 1000 }), false);
+});
+
+test("a refused UPGRADE is not proof of a revoke — the service fails closed on a read error", () => {
+  // remote-browser-service server/main.py:180-198 rejects a device token whenever the
+  // identity store cannot be read, documenting it as costing "a retry, not a bad grant",
+  // and that path emits the same 401 as a real revoke. Only a 1008 on an OPEN socket is
+  // the user actually revoking this device (server/api/keeper.py:387).
+  assert.equal(classifyAuthFailure({ kind: "device", code: 1008, reason: "Device token revoked" }), "revoked");
+  assert.equal(classifyAuthFailure({ kind: "device", httpStatus: 401, reason: "Unauthorized" }), "refused");
+  assert.equal(classifyAuthFailure({ kind: "device", reason: "Device token is not enrolled" }), "refused");
+  // Unchanged where it matters: the account key's 401 still means "wrong key", and an
+  // ordinary disconnect still means nothing at all.
+  assert.equal(classifyAuthFailure({ kind: "account", httpStatus: 401 }), "none");
+  assert.equal(classifyAuthFailure({ kind: "device", code: 1006 }), "none");
 });
 
 test("enrollment is attempted only when there is something to upgrade, and with room to breathe", () => {
