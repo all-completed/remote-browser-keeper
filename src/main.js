@@ -261,9 +261,20 @@ function connect() {
   });
   // A rejected upgrade (401) surfaces here, not as a close frame, and carries the
   // service's status — which is how we tell "token revoked" from "network is down".
-  ws.on("unexpected-response", (_req, res) => {
+  //
+  // It must also drive the reconnect itself: a socket that never reached OPEN emits no
+  // "close" once the response is destroyed, so without this the Keeper would sit offline
+  // forever after a single 401 — which is precisely the dead-token loop issue #15 rules
+  // out, in its quietest form. scheduleReconnect() is idempotent, so a "close" arriving
+  // anyway costs nothing.
+  ws.on("unexpected-response", (req, res) => {
     handleAuthClose({ httpStatus: res.statusCode, reason: res.statusMessage || "" });
     try { res.destroy(); } catch {}
+    try { req.destroy(); } catch {}
+    connected = false;
+    stopHeartbeat();
+    updateTray();
+    scheduleReconnect();
   });
   ws.on("error", (e) => { console.warn("[keeper] ws error", e.message); try { ws.close(); } catch {} });
 }
@@ -359,6 +370,9 @@ function handleAuthClose({ httpStatus = 0, code = 0, reason = "" } = {}) {
   rejectedTokens += 1;
   if (rejectedTokens < 2) enrollState.lastAttempt = 0;
   else enrollState.supported = false;
+  // The credential just changed, so the next attempt is a fresh start, not a retry of
+  // the one that failed — don't make the user wait out a grown backoff for it.
+  reconnectDelay = 1000;
   console.warn("[keeper] device token rejected ("
     + (httpStatus ? "HTTP " + httpStatus : "close " + code) + "); falling back to the account key");
 }

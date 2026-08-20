@@ -59,7 +59,9 @@ test("enrollDevice sends the key in a header, never the URL", async () => {
   let seen = null;
   const fetchImpl = async (url, init) => {
     seen = { url, init };
-    return { status: 200, json: async () => ({ token: "dev-token", device: { id: "d1" }, secret_bound: true }) };
+    // `device_id` is what the service actually returns (public_device_record) — reading
+    // `id` here is what shipped first, and it silently left every device unadopted.
+    return { status: 200, json: async () => ({ token: "dev-token", device: { device_id: "d1" }, secret_bound: true }) };
   };
   const res = await enrollDevice({
     baseUrl: "https://rb.example.com/",
