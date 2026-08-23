@@ -23,13 +23,21 @@ import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
 import { normalizeDeclineReason } from "./declinereason.js";
 import { requestDeadline } from "./deadline.js";
 import { createOutbox } from "./outbox.js";
+import { rendererUrl, refuseSender } from "./ipcsender.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Renderer is built by Vite to ../renderer-dist (one HTML per window). With
 // KEEPER_DEV=1, load from the Vite dev server instead for hot-reload.
 const KEEPER_DEV = process.env.KEEPER_DEV === "1";
+const RENDERER_DIR = path.join(__dirname, "..", "renderer-dist");
+// The one definition of "our own document", used BOTH to load a window and to check that
+// a message really came from it (see ipcsender.js) — so the two cannot drift apart.
+function pageUrl(name) { return rendererUrl(name, { dev: KEEPER_DEV, rendererDir: RENDERER_DIR }); }
 function loadWindow(win, name) {
+  // Which page this window holds. The IPC guard reads it back off the window to know
+  // which document a message from it is supposed to be coming from.
+  win.keeperPage = name;
   // A window whose content fails to load still shows its frame, so the failure would
   // otherwise be a silent empty box. Name it in the log for EVERY window (the prompt
   // window additionally turns it into a user-visible failure — see failPrompt).
@@ -43,8 +51,34 @@ function loadWindow(win, name) {
   wc.on("render-process-gone", (_e, details) => {
     console.error(`[keeper] ${name} window renderer gone:`, (details && details.reason) || "?");
   });
-  if (KEEPER_DEV) win.loadURL(`http://localhost:5173/${name}.html`);
-  else win.loadFile(path.join(__dirname, "..", "renderer-dist", `${name}.html`));
+  win.loadURL(pageUrl(name));
+}
+
+// Every ipcMain handler below names the window(s) it serves and starts with this: the
+// message is answered only when it came from one of them, from that window's top frame,
+// with our own document still in it. See ipcsender.js for why — in short, `ipcMain` has no
+// idea which window a channel belongs to, so without this every handler serves every
+// renderer, and the ones that carry a secret (pair:qr, fields:reveal, keeper:card-values,
+// keeper:saved-values, cards:load) or answer a request (keeper:submit) serve it to
+// whichever renderer asks first.
+//
+// A refusal is a real event — the app itself never produces one — so it is logged rather
+// than swallowed. The handler then returns its ordinary "nothing" (null / [] / {ok:false}),
+// never an error that would tell a caller the channel exists.
+function fromWindow(e, channel, ...wins) {
+  let frameUrl = null;
+  let isMainFrame = false;
+  try {
+    const frame = e.senderFrame;                 // throws once the frame is disposed
+    isMainFrame = !!frame && frame === e.sender.mainFrame;
+    frameUrl = frame ? frame.url : null;
+  } catch { /* frame gone — leaves frameUrl null, which is refused below */ }
+  const allowed = wins
+    .filter((w) => w && !w.isDestroyed())
+    .map((w) => ({ id: w.webContents.id, url: pageUrl(w.keeperPage), page: w.keeperPage }));
+  const refusal = refuseSender({ senderId: e.sender.id, frameUrl, isMainFrame }, allowed);
+  if (refusal) console.error(`[keeper] refused IPC "${channel}": ${refusal}`);
+  return !refusal;
 }
 
 // ---------- Local request history (NEVER stores values) ----------
@@ -660,8 +694,8 @@ function showNextPrompt() {
 // is the window shown, so the user never sees an empty approval window, and the render
 // watchdog stands down.
 ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!promptState || !win || win !== promptWin || promptState.requestId !== request_id) return;
+  if (!fromWindow(e, "keeper:prompt-rendered", promptWin)) return;
+  if (!promptState || promptState.requestId !== request_id) return;
   if (promptState.rendered) return;
   promptState.rendered = true;
   clearTimeout(promptState.timer);
@@ -673,8 +707,8 @@ ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
 // Pull side of the delivery: the prompt renderer asks for the request it must draw, so
 // it does not depend on having been listening when main pushed it.
 ipcMain.handle("keeper:pending-request", (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!promptState || !win || win !== promptWin) return null;
+  if (!fromWindow(e, "keeper:pending-request", promptWin)) return null;
+  if (!promptState) return null;
   return promptState.payload;
 });
 
@@ -810,14 +844,15 @@ function expireRequest(requestId) {
 // does not tick through suspend). Verified against main's own copy of the deadline, so the
 // renderer can never retire a request early.
 ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || win !== promptWin || !promptState || promptState.requestId !== request_id) return;
+  if (!fromWindow(e, "keeper:prompt-expired", promptWin)) return;
+  if (!promptState || promptState.requestId !== request_id) return;
   const req = pending.get(request_id);
   if (!req || req._expires_at == null || Date.now() < req._expires_at) return;
   expireRequest(request_id);
 });
 
-ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
+ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
+  if (!fromWindow(e, "keeper:submit", promptWin)) return;
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
 });
 // Decline. The optional `reason` is the user's short note about WHY (issue #11): it rides
@@ -826,6 +861,7 @@ ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
 // is the authority on what goes on the wire — and omitted entirely when there is none, so
 // a plain one-tap Cancel sends byte-for-byte what it always did.
 ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
+  if (!fromWindow(e, "keeper:cancel", promptWin)) return;
   // An expired request is already out of `pending`: there is nothing left to answer, but
   // the window must still close when the user dismisses it — resolveRequest would no-op
   // and leave a window nobody can get rid of. This does NOT swallow a decline reason: the
@@ -833,8 +869,7 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
   // elsewhere), and resolveRequest's own `pending` check would have dropped it anyway. A
   // live request still falls through to the full reason path below.
   if (!pending.has(request_id)) {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (win && !win.isDestroyed()) win.close();
+    if (promptWin && !promptWin.isDestroyed()) promptWin.close(); // the guard above proved it is the sender
     return;
   }
   const note = normalizeDeclineReason(reason);
@@ -843,7 +878,8 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
 // Prompt asks for a saved card's values mapped onto the pending request's fields
 // (when the user picks a card to pre-fill). Values stay local; the user reviews
 // and sends. Returns [{selector,value}].
-ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
+ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
+  if (!fromWindow(e, "keeper:card-values", promptWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -856,7 +892,8 @@ ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
 });
 // "Auto-fill on this site next time": approve the request's domain for the chosen
 // card and persist it. Future requests from that domain fill silently.
-ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {}) => {
+ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) => {
+  if (!fromWindow(e, "keeper:remember-card-domain", promptWin)) return { ok: false };
   try {
     const req = pending.get(request_id);
     if (!req) return { ok: false };
@@ -866,20 +903,21 @@ ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {})
     const store = loadCards(base);
     if (approveDomain(store, card_id, host)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true, host };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
 // "Allow for all sites": approve the chosen card for every site (wildcard).
-ipcMain.handle("keeper:remember-card-all-sites", (_e, { card_id } = {}) => {
+ipcMain.handle("keeper:remember-card-all-sites", (e, { card_id } = {}) => {
+  if (!fromWindow(e, "keeper:remember-card-all-sites", promptWin)) return { ok: false };
   try {
     const base = cardBaseUrl();
     const store = loadCards(base);
     if (approveAllSites(store, card_id)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
@@ -936,11 +974,15 @@ async function sendHistory() {
   });
 }
 
-ipcMain.on("history:refresh", () => { void sendHistory(); });
+ipcMain.on("history:refresh", (e) => {
+  if (!fromWindow(e, "history:refresh", historyWin)) return;
+  void sendHistory();
+});
 // The proof image, from wherever it survives: this device's JPEG first (no network),
 // else the service's copy — a request answered on another device, or one whose local
 // file was evicted, still shows its screenshot. null = neither side has it.
-ipcMain.handle("history:screenshot", async (_e, id) => {
+ipcMain.handle("history:screenshot", async (e, id) => {
+  if (!fromWindow(e, "history:screenshot", historyWin)) return null;
   const sid = safeId(id);
   if (!sid) return null;
   try {
@@ -1003,29 +1045,33 @@ function openSavedFieldsWindow() {
   savedFieldsWin.once("ready-to-show", () => { savedFieldsWin.show(); savedFieldsWin.focus(); });
   savedFieldsWin.on("closed", () => { savedFieldsWin = null; });
 }
-ipcMain.handle("fields:list", () => {
+ipcMain.handle("fields:list", (e) => {
+  if (!fromWindow(e, "fields:list", savedFieldsWin)) return [];
   try { return listSaved(loadConfig().baseUrl); } catch { return []; }
 });
 // Reveal a single saved value on demand (e.g. to read a generated password you never
 // saw). The value stays local — returned only to this window's renderer, never the AI.
-ipcMain.handle("fields:reveal", (_e, { session, host, selector } = {}) => {
+ipcMain.handle("fields:reveal", (e, { session, host, selector } = {}) => {
+  if (!fromWindow(e, "fields:reveal", savedFieldsWin)) return { ok: false, value: null };
   try {
     const s = getSaved(loadConfig().baseUrl, session, host, selector);
     return { ok: true, value: s ? s.value : null };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("fields:forget", (_e, { session, host, selector } = {}) => {
+ipcMain.handle("fields:forget", (e, { session, host, selector } = {}) => {
+  if (!fromWindow(e, "fields:forget", savedFieldsWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const wasVault = getSaved(baseUrl, session, host, selector)?.scope === "vault";
     forgetField(baseUrl, session, host, selector);
     if (wasVault) void syncVaultNow(); // propagate the tombstone to other devices
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("fields:forget-all", () => {
+ipcMain.handle("fields:forget-all", (e) => {
+  if (!fromWindow(e, "fields:forget-all", savedFieldsWin)) return { ok: false };
   try { forgetAllFields(loadConfig().baseUrl); void syncVaultNow(); return { ok: true }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
 
 let pairWin = null;
@@ -1109,17 +1155,22 @@ function openSettingsWindow() {
   settingsWin.on("closed", () => { settingsWin = null; });
 }
 // Per-device Keeper preferences (see settings.js). Non-secret; local-only.
-ipcMain.handle("keeper:get-settings", () => {
+ipcMain.handle("keeper:get-settings", (e) => {
+  if (!fromWindow(e, "keeper:get-settings", settingsWin)) return { ok: false };
   try { return { ok: true, settings: loadSettings(loadConfig().baseUrl) }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("keeper:set-settings", (_e, patch = {}) => {
+ipcMain.handle("keeper:set-settings", (e, patch = {}) => {
+  if (!fromWindow(e, "keeper:set-settings", settingsWin)) return { ok: false };
   try { return { ok: true, settings: saveSettings(loadConfig().baseUrl, patch) }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
 // Encode the connection config into a QR image. The token lives only inside the
 // returned image — it is never sent to the renderer as text.
-ipcMain.handle("pair:qr", async () => {
+ipcMain.handle("pair:qr", async (e) => {
+  // The single highest-value channel in the app: the image it returns carries the API key,
+  // the session secret AND the vault password. Only the Pair window may ever ask.
+  if (!fromWindow(e, "pair:qr", pairWin)) return { error: "Not available." };
   try {
     const { baseUrl, apiKey } = loadConfig();
     if (!apiKey) return { error: "No API key configured for this Keeper." };
@@ -1135,36 +1186,41 @@ ipcMain.handle("pair:qr", async () => {
     let host = baseUrl;
     try { host = new URL(baseUrl).host; } catch { /* keep raw */ }
     return { dataUrl, host };
-  } catch (e) {
-    return { error: e.message };
+  } catch (err) {
+    return { error: err.message };
   }
 });
 
 // Vault key status for the UI: whether a key is held, whether it's a custom (user)
 // password, and whether this device is out of sync (needs re-pair).
-ipcMain.handle("keeper:vault-status", () => {
+ipcMain.handle("keeper:vault-status", (e) => {
+  // Two windows ask this one: the prompt (to default a generated password to the vault)
+  // and the vault-password window.
+  if (!fromWindow(e, "keeper:vault-status", promptWin, vaultPwWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const k = loadVaultKey(baseUrl);
     return { ok: true, hasKey: !!k, custom: !!(k && k.format === "aesgcm-pbkdf2-v2"), needsRepair: vaultNeedsRepair };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // The same identity + vault state we report to the service, for the Settings window — so
 // "what is this device on?" is answerable without asking the service. Inert metadata: no
 // password, no key, and (per vaultKeyReport) no secret_id for a legacy v1 key.
-ipcMain.handle("keeper:device-info", () => {
+ipcMain.handle("keeper:device-info", (e) => {
+  if (!fromWindow(e, "keeper:device-info", settingsWin)) return { ok: false };
   try {
     const report = deviceReport();
     if (!report.device) return { ok: false, error: "device report unavailable" };
     return { ok: true, ...report };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // Item 3: set a user-chosen vault password. Reads the current vault under the current
 // key, re-encrypts it under the new password (pbkdf2), and re-uploads — so no data is
 // lost. Other paired devices then see a secret_id mismatch and must re-pair to resync.
-ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
+ipcMain.handle("keeper:set-vault-password", async (e, { password } = {}) => {
+  if (!fromWindow(e, "keeper:set-vault-password", vaultPwWin)) return { ok: false };
   try {
     const cfg = loadConfig();
     if (!cfg.apiKey) return { ok: false, error: "No API key configured." };
@@ -1175,9 +1231,9 @@ ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
     const oldKey = loadVaultKey(cfg.baseUrl) || ensureVaultKey(cfg.baseUrl);
     let current;
     try { current = await pullVault(conn, oldKey); }
-    catch (e) {
-      if (e instanceof VaultKeyMismatch) return { ok: false, error: "This device is out of sync — re-pair it first." };
-      return { ok: false, error: e.message };
+    catch (err) {
+      if (err instanceof VaultKeyMismatch) return { ok: false, error: "This device is out of sync — re-pair it first." };
+      return { ok: false, error: err.message };
     }
     const newKey = userVaultKey(pw);
     const put = await putVault(conn, newKey, current.data || emptyVault(), current.version);
@@ -1187,18 +1243,26 @@ ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
     reportDeviceState(); // new key format + new vault id — tell the service which vault we're on now
     console.log("[keeper] vault re-keyed to a custom password (pbkdf2-v2); other devices must re-pair");
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
-ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
-ipcMain.handle("cards:save", (_e, store) => {
+// Card numbers and CVVs — the Cards window and nothing else.
+ipcMain.handle("cards:load", (e) => {
+  if (!fromWindow(e, "cards:load", cardsWin)) return {}; // an empty store is `{}` — see cards.js `_store`
+  return loadCards(cardBaseUrl());
+});
+ipcMain.handle("cards:storage-info", (e) => {
+  if (!fromWindow(e, "cards:storage-info", cardsWin)) return { encrypted: false, platform: process.platform };
+  return { encrypted: secureStorageAvailable(), platform: process.platform };
+});
+ipcMain.handle("cards:save", (e, store) => {
+  if (!fromWindow(e, "cards:save", cardsWin)) return { ok: false };
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");
     saveCards(cardBaseUrl(), store);
     void syncVaultNow(); // propagate the card add/edit/delete to other devices
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
@@ -1241,12 +1305,12 @@ function openImageWindow(dataUrl) {
 // The prompt renderer reports its content height; fit the window to it (keep the
 // width, cap to the screen) so there's no empty space or clipped content.
 ipcMain.on("keeper:resize", (e, height) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || win !== promptWin || !Number.isFinite(height) || height < 1) return;
+  if (!fromWindow(e, "keeper:resize", promptWin)) return;
+  if (!Number.isFinite(height) || height < 1) return;
   const area = screen.getPrimaryDisplay().workAreaSize;
-  const [w] = win.getContentSize();
+  const [w] = promptWin.getContentSize();
   const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
-  win.setContentSize(w, ch);
+  promptWin.setContentSize(w, ch);
 });
 // Silent fill when EVERY field of the request has a saved value marked "don't ask
 // again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
@@ -1330,7 +1394,8 @@ function tryAutofillFields(req) {
 
 // Saved field values: return any previously-saved values for this request's
 // fields (so the prompt prefills them), and save the submitted values per scope.
-ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
+ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
+  if (!fromWindow(e, "keeper:saved-values", promptWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1346,7 +1411,8 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     return [];
   }
 });
-ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = {}) => {
+ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {}) => {
+  if (!fromWindow(e, "keeper:save-fields", promptWin)) return { ok: false };
   try {
     if (!Array.isArray(values) || !["session", "forever", "vault", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
@@ -1366,21 +1432,25 @@ ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = 
     }
     if (touchedVault) void syncVaultNow(); // push the new/removed vault entry to other devices
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
-ipcMain.on("keeper:view-image", (_e, dataUrl) => openImageWindow(dataUrl));
+// Both the prompt and History offer "tap the proof image to enlarge".
+ipcMain.on("keeper:view-image", (e, dataUrl) => {
+  if (!fromWindow(e, "keeper:view-image", promptWin, historyWin)) return;
+  openImageWindow(dataUrl);
+});
 // The viewer reports the image's natural size; fit the window to it (capped to
 // the screen work area) so the user sees it at normal size.
 ipcMain.on("image:sized", (e, w, h) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || !Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
+  if (!fromWindow(e, "image:sized", imageWin)) return;
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
   const area = screen.getPrimaryDisplay().workAreaSize;
   const cw = Math.max(320, Math.min(Math.round(w) + 32, area.width - 80));
   const ch = Math.max(240, Math.min(Math.round(h) + 32, area.height - 120));
-  win.setContentSize(cw, ch);
-  win.center();
+  imageWin.setContentSize(cw, ch);
+  imageWin.center();
 });
 
 // ---------- Tray ----------

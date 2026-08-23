@@ -40,6 +40,7 @@ remote-browser-keeper/
 | `outbox.js` | Holds a `fill_response` / `secret_response` the socket could not take and re-sends it when the link is back, so an answer given during an outage is not silently lost (issue #19). In memory only (it holds values), bounded by the request's own deadline, and the record of what has already been answered — a replayed `fill_request` must not prompt twice. Pure — the socket is injected. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
 | `declinereason.js` | The optional note a user attaches when **declining** (`DECLINE_PRESETS`, `DECLINE_REASON_MAX`, `normalizeDeclineReason`). Shared by the prompt UI and the main process, which re-normalizes whatever the renderer sends. Plain text meant for the agent — never a value. |
+| `ipcsender.js` | **Who may send a given IPC message.** `rendererUrl(page, …)` is the single definition of "one of our own documents" — used both to load a window and to check that a message really came from it; `refuseSender(sender, allowed)` is the decision. Pure; see [Windows & IPC](#windows--ipc). |
 | `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`, `onExpired`/`reportExpired`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
@@ -66,6 +67,26 @@ The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
 preload bridge (e.g. `keeper:request`, `history:data`, `image:data`) and back via
 IPC (`keeper:submit`, `history:screenshot`, `keeper:view-image`). The typed value
 travels renderer → main → WebSocket only; it is never written to disk or logged.
+
+**Every handler validates its sender** (`src/ipcsender.js`, issue #18). `ipcMain` has
+no notion of which window a channel belongs to, so a handler that answers whoever asked
+serves *every* renderer — and the ones that carry a secret (`pair:qr`, `fields:reveal`,
+`keeper:card-values`, `keeper:saved-values`, `cards:load`) or answer a pending request
+(`keeper:submit`) would serve it to whichever renderer asks first. So each handler names
+the window(s) it serves and starts with `fromWindow(event, channel, …wins)`, which
+requires all three of:
+
+1. the sender **is** one of those windows (identity, by `webContents.id`);
+2. the message came from that window's **top frame**, not an embedded one;
+3. that frame is still showing **our own document** — `rendererUrl(win.keeperPage)`, the
+   very URL `loadWindow` put there.
+
+The preload bridges are the first layer (a renderer can only call what its own preload
+exposes); this is the layer under it, for anything that gets past isolation. A refusal is
+logged (`[keeper] refused IPC "<channel>": <reason>`) and the handler returns its ordinary
+"nothing" — `null` / `[]` / `{ ok: false }` — never an error that would confirm the channel
+exists. `keeper:vault-status` (prompt + vaultpw) and `keeper:view-image` (prompt + history)
+are the only channels served for two windows.
 
 ### Declining with a reason
 
