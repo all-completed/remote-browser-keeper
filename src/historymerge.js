@@ -8,8 +8,10 @@
 //                 any request a DIFFERENT paired device answered: the service fans the
 //                 fill_request out to every connected keeper, and the ones that lose the
 //                 race only get a `request_resolved` dismissal, which records nothing.
-//   local-only  — an offline submit (recordHistory runs before safeSend, and safeSend
-//                 no-ops on a closed socket), and anything the service has since dropped.
+//   local-only  — an answer this device could not deliver: it is recorded when the user
+//                 gives it, and the socket may still be down (the outbox retries until the
+//                 request's deadline, then writes a second `undelivered` record — see
+//                 src/outbox.js), plus anything the service has since dropped.
 // So the union — not either list on its own — is what actually happened on the account.
 //
 // PRECEDENCE (also documented in docs/file-structure.md):
@@ -52,6 +54,9 @@ function toIso(ts) {
 // `expired` IS the server's `timeout`: both sides watched the same deadline pass (the
 // Keeper reads it off the fill_request frame — see src/deadline.js), so seeing them
 // side by side as a disagreement would be noise.
+// `undelivered` is likewise NOT paired with `timeout`, for the same reason as `ui_failed`:
+// the server can only see that nobody answered in time, while this device knows the user
+// DID answer and the connection ate it — that gap is the whole point of showing both.
 const SAME_EVENT = { submitted: ["filled"], autofilled: ["filled"], cancelled: ["cancelled"], expired: ["timeout"] };
 export function statusesAgree(outcome, status) {
   if (!outcome || !status) return true; // only one side knows — nothing to disagree about
