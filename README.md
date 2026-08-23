@@ -170,6 +170,26 @@ unknown deadline stays unknown rather than being invented. That is where things 
 today: the service sends neither, so the countdown appears only once `expires_at` is added
 to `fill_request` server-side. See `src/deadline.js`.
 
+### An answer is never dropped silently
+
+The socket is not always up when the user finally answers: the prompt may be on screen for
+the whole 300s, and a laptop sleeping, a wifi change or a service restart closes the link
+underneath it, with a reconnect backoff of up to 30s behind that. Writing the answer to a
+closed socket used to be a no-op, so the value the user had just typed went nowhere — and
+the agent was told, 300s later, that nobody had answered.
+
+So a `fill_response` / `secret_response` that cannot go out is **held and re-sent** when the
+link is back; for an outage shorter than the request's deadline the user never learns there
+was one, and until it lands the tray says *"⏳ n answer(s) waiting for the connection"*. A
+replayed `fill_request` whose answer is still queued does **not** ask the user a second time.
+
+What is still undeliverable once the request stops being answerable is **reported, never
+forgotten**: an error in the log, a ⚠︎ in the menu bar, and an `undelivered` row in History
+(shown next to the service's `timeout` — the two sides genuinely disagree about what
+happened, and that gap is the point). The queue is in memory only, holds one answer per
+request, and drops an answer — values with it — as soon as nobody can still be waiting for
+it. See `src/outbox.js`.
+
 ## Security properties
 
 - The value travels `keeper → service` only; it is **never** in the agent-facing
@@ -218,6 +238,8 @@ Full layout — source tree, windows/IPC, and the on-disk data store — is in
 - `src/main.js` — main process: tray, keeper WS client (reconnect), prompt /
   history / image windows, IPC, and per-URL history storage
 - `src/config.js` — base URL + API key resolution
+- `src/outbox.js` — answers the socket could not take: held, re-sent on reconnect,
+  and reported if the request dies first ([above](#an-answer-is-never-dropped-silently))
 - `src/historyapi.js` + `src/historymerge.js` — the service's copy of the request
   history, and its union with the local log: **History…** shows one list, each row
   tagged *local only* / *server only* / *both*

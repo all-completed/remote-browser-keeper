@@ -13,8 +13,10 @@ function hostOf(u) {
 }
 
 // Colour for a status word from EITHER vocabulary — local outcomes
-// (submitted/cancelled/autofilled/ui_failed/expired) and server statuses
-// (pending/filled/cancelled/timeout/no_keeper/error) share one scale.
+// (submitted/cancelled/autofilled/ui_failed/expired/undelivered) and server statuses
+// (pending/filled/cancelled/timeout/no_keeper/error) share one scale. A word in neither set
+// reads red, which is right for the two that mean "this device failed you": `ui_failed`
+// and `undelivered`.
 const OK = new Set(["submitted", "autofilled", "filled"]);
 const WARN = new Set(["pending", "timeout", "expired", "no_keeper"]);
 const badgeClass = (v) => (OK.has(v) ? "ok" : WARN.has(v) ? "warn" : "no");

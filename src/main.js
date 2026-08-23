@@ -22,6 +22,7 @@ import { mergeHistory } from "./historymerge.js";
 import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
 import { normalizeDeclineReason } from "./declinereason.js";
 import { requestDeadline } from "./deadline.js";
+import { createOutbox } from "./outbox.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -125,7 +126,10 @@ function recordHistory(req, outcome, reason) {
       url: req.url || null,
       requested_at: req._requested_at || null, // when the request arrived (ISO)
       resolved_at: now.toISOString(),
-      outcome, // "submitted" (user sent values) | "cancelled" | "autofilled" | "ui_failed" | "expired"
+      // "submitted" (user sent values) | "cancelled" | "autofilled" | "ui_failed" | "expired"
+      // | "undelivered" (answered here, but the link never came back — issue #19; written as
+      // a SECOND record for the request, which supersedes the first: see mergeHistory)
+      outcome,
       ...(reason ? { reason } : {}), // why it was declined, when the user said
       screenshot: hasShot ? "screenshots/" + req.request_id + ".jpg" : null,
       fields: (Array.isArray(req.fields) ? req.fields : []).map((f) => ({
@@ -180,6 +184,11 @@ const HEARTBEAT_MS = 25000; // how often we ping the service
 const DEAD_AFTER_MS = 70000; // no inbound frame this long => socket is dead
 const pending = new Map(); // request_id -> request payload (awaiting user)
 const queue = []; // request_ids waiting for the prompt window
+// Answers the socket could not take (issue #19). A fill/secret answer is never dropped on
+// the floor: it waits here for the reconnect, and if the request dies first that is
+// reported, not swallowed. In memory only — it holds the user's values. See outbox.js.
+const outbox = createOutbox({ send: safeSend });
+let lastUndelivered = null; // { requestId, why, at } — shown in the tray until dismissed
 
 // ---------- Keeper WebSocket ----------
 function connect() {
@@ -206,6 +215,9 @@ function connect() {
     startHeartbeat();
     updateTray();
     console.log("[keeper] connected");
+    // Before anything else on this socket: an answer the user already gave while we were
+    // down is the one thing here that somebody is actively waiting for.
+    flushOutbox();
     // Pull any vault entries saved on another paired device (and push ours).
     void syncVaultNow();
   });
@@ -218,10 +230,18 @@ function connect() {
     if (msg.type === "pong") { return; } // heartbeat reply (already counted above)
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
     // Another keeper (or a timeout) already resolved this request server-side —
-    // dismiss our prompt for it so the user isn't asked twice.
-    if (msg.type === "request_resolved" && msg.request_id) { dismissRequest(msg.request_id); return; }
+    // dismiss our prompt for it so the user isn't asked twice. A queued answer for it is
+    // dropped rather than reported: nobody is waiting for it, and it holds values.
+    if (msg.type === "request_resolved" && msg.request_id) {
+      if (outbox.drop(msg.request_id)) console.log("[keeper] queued answer for", msg.request_id, "is moot — resolved elsewhere");
+      dismissRequest(msg.request_id);
+      return;
+    }
     if (msg.type === "fill_request" && msg.request_id) {
       if (pending.has(msg.request_id)) return; // dedup: server replays pending on reconnect
+      // We already answered this one while the link was down — the replay only proves the
+      // service is still waiting. Push the answer again instead of asking the user twice.
+      if (outbox.has(msg.request_id)) { flushOutbox(); return; }
       msg._requested_at = new Date().toISOString();
       msg._expires_at = requestDeadline(msg); // absolute, off the frame — null if not on the wire
       // A replay can carry a request the service has already given up on. Asking the user
@@ -279,8 +299,72 @@ function scheduleReconnect() {
   }, reconnectDelay);
 }
 
+// Fire-and-forget: fine for a ping/hello/device_state, where a frame lost to a closed
+// socket costs nothing (the next one carries the same truth). Returns whether the frame
+// actually went out — anything somebody is WAITING for must go through sendAnswer instead.
 function safeSend(obj) {
-  try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {}
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    console.warn("[keeper] send failed:", e.message);
+    return false;
+  }
+}
+
+// The single path for every fill_response/secret_response: the frames a request is blocked
+// on. If the socket cannot take it, it is queued and re-sent on reconnect (outbox.js), and
+// the user is told the answer is still in flight rather than being left to believe it landed.
+function sendAnswer(frame, { expiresAt = null, req = null } = {}) {
+  const { sent, evicted } = outbox.deliver(frame, { expiresAt, meta: req });
+  reportUndelivered(evicted);
+  if (!sent) {
+    console.warn("[keeper] link is down — answer for request", frame.request_id,
+      "is queued and will be sent on reconnect");
+    startOutboxTicker();
+    updateTray();
+  }
+  return sent;
+}
+
+// While anything is queued the outbox must be looked at on its own schedule, not only when
+// a socket opens. Two outages have no close/open event to hang off: a connect attempt that
+// HANGS (a black-holed network, rather than one that refuses), and an open socket whose
+// writes fail. In both, the only other tick — the reconnect backoff — has already run, and
+// an answer would sit there past its deadline with the user still believing it landed.
+const OUTBOX_TICK_MS = 5000;
+let outboxTimer = null;
+function startOutboxTicker() {
+  if (outboxTimer || !outbox.size()) return;
+  outboxTimer = setInterval(() => {
+    flushOutbox();
+    if (!outbox.size()) { clearInterval(outboxTimer); outboxTimer = null; }
+  }, OUTBOX_TICK_MS);
+}
+
+// Push whatever the last outage left queued, and name whatever can no longer be delivered.
+function flushOutbox() {
+  const { sent, evicted } = outbox.flush();
+  for (const e of sent) console.log("[keeper] delivered queued answer for request", e.requestId);
+  reportUndelivered(evicted);
+  if (sent.length) updateTray();
+}
+
+// An answer that never reached the service before its request stopped being answerable.
+// Same doctrine as failPrompt: a failure gets a name, in the log, in the tray and in
+// History (the later `undelivered` record supersedes the earlier `submitted` one — the log
+// is read newest-first and mergeHistory keeps the newest line per request_id). The one
+// thing this outcome must never be is invisible.
+function reportUndelivered(entries) {
+  for (const e of entries) {
+    const kind = e.frame && e.frame.type === "secret_response" ? "secret" : "fill";
+    console.error("[keeper] " + kind + " answer for request " + e.requestId + " was NEVER DELIVERED"
+      + " (" + e.why + ") — the connection did not come back before the request stopped being answerable");
+    lastUndelivered = { requestId: e.requestId, why: e.why, at: new Date().toISOString() };
+    if (e.meta) recordHistory(e.meta, "undelivered");
+  }
+  if (entries.length) updateTray();
 }
 
 // Service asked for a session-encryption secret by secret_id (zero-knowledge
@@ -297,10 +381,10 @@ function handleSecretRequest(msg) {
     console.warn("[keeper] secret store error:", e.message);
   }
   if (secret) {
-    safeSend({ type: "secret_response", request_id: msg.request_id, secret, grant: "once" });
+    sendAnswer({ type: "secret_response", request_id: msg.request_id, secret, grant: "once" });
     console.log("[keeper] secret_request", sidShort, "-> responded");
   } else {
-    safeSend({ type: "secret_response", request_id: msg.request_id, denied: true });
+    sendAnswer({ type: "secret_response", request_id: msg.request_id, denied: true });
     console.warn("[keeper] secret_request", sidShort, "-> not in vault, denied");
   }
 }
@@ -445,7 +529,7 @@ function tryAutofillCard(req) {
   if (!card) return false; // not approved for this site → fall through to the prompt
   const values = buildCardValues(fields, card);
   if (!values) return false; // card can't fully satisfy it — let the user fill
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   recordHistory(req, "autofilled");
   console.log("[keeper] card autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
   return true;
@@ -560,8 +644,10 @@ function showNextPrompt() {
     }
     // If closed without an explicit submit/cancel, treat as cancel.
     if (pending.has(requestId)) {
-      recordHistory(pending.get(requestId), "cancelled");
-      safeSend({ type: "fill_response", request_id: requestId, cancelled: true });
+      const closed = pending.get(requestId);
+      recordHistory(closed, "cancelled");
+      sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true },
+        { expiresAt: closed._expires_at, req: closed });
       pending.delete(requestId);
     }
     if (queue[0] === requestId) queue.shift();
@@ -610,7 +696,8 @@ function failPrompt(requestId, reason) {
   const req = pending.get(requestId);
   if (req) {
     recordHistory(req, "ui_failed");
-    safeSend({ type: "fill_response", request_id: requestId, cancelled: true, error: "keeper_ui_failed", reason });
+    sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true, error: "keeper_ui_failed", reason },
+      { expiresAt: req._expires_at, req });
     pending.delete(requestId);
   }
   if (queue[0] === requestId) queue.shift();
@@ -646,8 +733,9 @@ function focusRequest(requestId) {
 function resolveRequest(requestId, payload) {
   if (!pending.has(requestId)) return;
   clearExpiry(requestId);
-  recordHistory(pending.get(requestId), payload.cancelled ? "cancelled" : "submitted", payload.reason);
-  safeSend({ type: "fill_response", request_id: requestId, ...payload });
+  const req = pending.get(requestId);
+  recordHistory(req, payload.cancelled ? "cancelled" : "submitted", payload.reason);
+  sendAnswer({ type: "fill_response", request_id: requestId, ...payload }, { expiresAt: req._expires_at, req });
   pending.delete(requestId);
   if (queue[0] === requestId) queue.shift();
   if (promptWin) { const w = promptWin; promptWin = null; w.close(); }
@@ -1190,7 +1278,7 @@ function tryAutofillGenerate(req) {
     values.push({ selector: f.selector, value });
     if (host) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true); // auto-fill next time
   }
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   if (scope === "vault" && host) void syncVaultNow();
   recordHistory(req, "autofilled");
   logGenerated(req, fields, shared, host, scope);
@@ -1234,7 +1322,7 @@ function tryAutofillFields(req) {
     if (!s || !s.auto || s.value == null) return false; // not all auto-fillable → prompt
     values.push({ selector: f.selector, value: s.value });
   }
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   recordHistory(req, "autofilled");
   console.log("[keeper] field autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
   return true;
@@ -1321,7 +1409,7 @@ function updateTray() {
   tray.setToolTip(`Remote Browser Keeper — ${state} · ${host}`);
   // A render failure is announced in the menu bar itself, since the surface that would
   // normally tell the user (the prompt window) is the thing that just failed.
-  if (process.platform === "darwin") tray.setTitle(lastPromptFailure ? "⚠︎" : trayFallbackTitle);
+  if (process.platform === "darwin") tray.setTitle(lastPromptFailure || lastUndelivered ? "⚠︎" : trayFallbackTitle);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `Service: ${host}`, enabled: false },
     // Use colored emoji dots: a plain "●" inherits the (gray) disabled-item text
@@ -1331,6 +1419,16 @@ function updateTray() {
     ...(lastPromptFailure ? [{
       label: `⚠︎ Approval window failed to render (${lastPromptFailure.reason}) — click to dismiss`,
       click: () => { lastPromptFailure = null; updateTray(); },
+    }, { type: "separator" }] : []),
+    // An answer already given but not yet on the wire: the user closed the prompt believing
+    // they were done, so the menu bar is where that belief gets corrected (issue #19).
+    ...(outbox.size() ? [{
+      label: `⏳ ${outbox.size()} answer(s) waiting for the connection`,
+      enabled: false,
+    }, { type: "separator" }] : []),
+    ...(lastUndelivered ? [{
+      label: `⚠︎ An answer never reached the service (${lastUndelivered.why}) — click to dismiss`,
+      click: () => { lastUndelivered = null; updateTray(); },
     }, { type: "separator" }] : []),
     ...pendingMenuItems(),
     { label: "Cards…", click: openCardsWindow },
