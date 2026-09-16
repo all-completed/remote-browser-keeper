@@ -137,14 +137,40 @@ class FileSystemSecretStore {
     // warned about above and left exactly as it is — shredding it would destroy the
     // only copy of something we merely failed to parse.
     const readable = inbox.state === PLAINTEXT || inbox.state === ENCRYPTED;
-    if (readable && countSecrets(inbox.data) > 0) this._absorbInbox(merged, countSecrets(inbox.data));
+    if (readable && countSecrets(inbox.data) > 0) {
+      this._absorbInbox(merged, countSecrets(inbox.data), held.state);
+    }
     return merged;
+  }
+
+  // Move an existing store we could not READ out of the absorb's way, to the first
+  // free `.unreadable[-N]` name — never onto one, since an earlier reset may have
+  // parked a different envelope there and overwriting it is the very loss this
+  // avoids. Returns where the bytes now live; throws if it could not be moved (the
+  // caller then leaves everything where it is).
+  _preserveUnreadable() {
+    for (let n = 1; n <= 50; n++) {
+      const aside = `${this.secureFile}.unreadable${n > 1 ? `-${n}` : ""}`;
+      if (fs.existsSync(aside)) continue;
+      fs.renameSync(this.secureFile, aside);
+      return aside;
+    }
+    throw new Error(`${path.basename(this.secureFile)}.unreadable-N: no free name to move the unreadable store to`);
   }
 
   // Fold the plaintext inbox into the encrypted store and remove it. The inbox is only
   // shredded once the encrypted copy reads back holding every id, so a failed write
   // can never be the step that loses a secret.
-  _absorbInbox(merged, incomingCount) {
+  //
+  // `heldState` matters when it means "there IS a store here and we could not read
+  // it" (a reset login keyring or DPAPI profile leaves old envelopes UNDECRYPTABLE
+  // while encryption itself stays available; a store copied from another machine is
+  // the same). `merged` then holds the inbox alone, so replacing the file would
+  // rename a fresh envelope over bytes that are still RECOVERABLE — restore the key
+  // and they decrypt — and the read-back check, which only knows the ids it just
+  // wrote, would pass and shred the inbox. So those bytes are moved aside first,
+  // never written over.
+  _absorbInbox(merged, incomingCount, heldState) {
     if (!available()) {
       // No OS backend: writing the "encrypted" store would just be a second plaintext
       // file. Leave the inbox as the single copy and hold it to the 600 the docs claim.
@@ -154,6 +180,8 @@ class FileSystemSecretStore {
       return;
     }
     try {
+      let aside = null;
+      if (readFailed(heldState)) aside = this._preserveUnreadable();
       writeJson(this.secureFile, merged, { requireEncryption: true });
       const back = readJsonState(this.secureFile);
       const ids = Object.keys(merged.secrets || {});
@@ -162,6 +190,10 @@ class FileSystemSecretStore {
       }
       shred(this.file);
       console.log(`[keeper] secrets: moved ${incomingCount} plaintext secret(s) into the OS-encrypted store`);
+      if (aside) {
+        console.warn(`[keeper] secrets: the previous ${this.secureFile} was ${heldState}; its bytes are kept at ${aside} —`,
+          "recover the OS key it was encrypted with to read them, and MERGE them back (do not just rename it over the new store)");
+      }
     } catch (e) {
       try { fs.chmodSync(this.file, 0o600); } catch { /* not ours / not there */ }
       warnOnce(`${this.file}:migrate`,

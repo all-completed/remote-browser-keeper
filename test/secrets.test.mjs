@@ -33,8 +33,11 @@ const BASE = "https://rb.example.com";
 
 // A stand-in for Electron safeStorage: a real, reversible transform (not the identity)
 // so an "encrypted" file provably does not contain the plaintext.
-function fakeSafe({ ok = true } = {}) {
-  const KEY = crypto.createHash("sha256").update("test-key").digest();
+// A different `key` stands in for a different OS keyring: envelopes written under one
+// are UNDECRYPTABLE under the other while encryption stays available — exactly what a
+// reset login keyring / Windows profile leaves behind.
+function fakeSafe({ ok = true, key = "test-key" } = {}) {
+  const KEY = crypto.createHash("sha256").update(key).digest();
   return {
     isEncryptionAvailable: () => ok,
     encryptString(s) {
@@ -155,6 +158,102 @@ test("a failed migration loses nothing: the inbox survives and the held store is
   assert.equal(after.getSecret(SID), SECRET);
   assert.equal(after.getSecret(OLD_SID), OLD);
   assert.equal(fs.existsSync(inbox), false);
+});
+
+// Absorbing an inbox must never REPLACE a store we could not read. The store is only
+// unreadable because the key is gone (a reset keyring), and the key can come back —
+// which makes those bytes recoverable, and overwriting them the one irreversible step.
+// `merged` holds the inbox alone in that case, and the read-back check only knows the
+// ids it just wrote, so nothing downstream would notice the loss.
+function resetTheKeyring() {
+  // The old secret, encrypted under keyring A…
+  writeInbox(entry(OLD, "first"));
+  assert.equal(createSecretStore({ baseUrl: BASE }).getSecret(OLD_SID), OLD);
+  const envelope = fs.readFileSync(securePath(BASE), "utf8");
+  // …then the login keyring is reset: encryption still works, that envelope does not.
+  _setSafeForTest(fakeSafe({ key: "keyring-B-after-a-reset" }));
+  assert.equal(readJsonState(securePath(BASE)).state, UNDECRYPTABLE, "precondition");
+  return envelope;
+}
+
+test("an UNDECRYPTABLE held store is moved aside, never written over", () => {
+  const envelope = resetTheKeyring();
+  const inbox = writeInbox(entry(SECRET, "second"));
+
+  const store = createSecretStore({ baseUrl: BASE });
+  assert.equal(store.getSecret(SID), SECRET, "the newly provisioned secret is served");
+
+  // The old envelope's bytes must still exist, untouched.
+  const aside = `${securePath(BASE)}.unreadable`;
+  assert.equal(fs.readFileSync(aside, "utf8"), envelope, "the unreadable store must survive byte-identical");
+  assert.notEqual(fs.readFileSync(securePath(BASE), "utf8"), envelope);
+
+  // …and they are genuinely RECOVERABLE, not merely present: the original keyring
+  // still decrypts them back to the secret they held.
+  _setSafeForTest(fakeSafe());
+  assert.equal(readJsonState(aside).data.secrets[OLD_SID].secret, OLD, "recoverable once the key is back");
+
+  // The inbox is still shredded — its secret did reach the encrypted store.
+  _setSafeForTest(fakeSafe({ key: "keyring-B-after-a-reset" }));
+  assert.equal(fs.existsSync(inbox), false);
+  assert.deepEqual(createSecretStore({ baseUrl: BASE }).listSecretIds(), [SID]);
+});
+
+test("a second reset never overwrites an already-parked unreadable store", () => {
+  const first = resetTheKeyring();
+  writeInbox(entry(SECRET, "second"));
+  assert.equal(createSecretStore({ baseUrl: BASE }).getSecret(SID), SECRET);
+
+  // Reset again, with the first salvaged envelope still parked beside the store.
+  const second = fs.readFileSync(securePath(BASE), "utf8");
+  _setSafeForTest(fakeSafe({ key: "keyring-C-after-another-reset" }));
+  const third = "third-secret", THIRD_SID = secretIdOf(third);
+  writeInbox(entry(third, "third"));
+  assert.equal(createSecretStore({ baseUrl: BASE }).getSecret(THIRD_SID), third);
+
+  assert.equal(fs.readFileSync(`${securePath(BASE)}.unreadable`, "utf8"), first, "the first salvage must not be clobbered");
+  assert.equal(fs.readFileSync(`${securePath(BASE)}.unreadable-2`, "utf8"), second, "the second goes to a free name");
+});
+
+test("if the unreadable store cannot be moved aside, nothing is absorbed", () => {
+  // The move-aside has to FAIL while the write that follows it would still succeed —
+  // otherwise the write fails too and the test would pass for the wrong reason. A HOME
+  // deep enough that `<store>.unreadable` crosses PATH_MAX does exactly that: the
+  // rename is ENAMETOOLONG, `<store>` and its `.tmp` are both still writable.
+  const TAIL = path.join(".remote-browser-keeper", "rb.example.com", "secrets.enc.json");
+  const WANT = 4088; // 4088 + ".tmp" still fits in PATH_MAX (4095); + ".unreadable" does not
+  const deeper = (n) => path.join(process.env.HOME, "d".repeat(n), TAIL).length;
+  while (deeper(200) <= WANT) process.env.HOME = path.join(process.env.HOME, "d".repeat(200));
+  process.env.HOME = path.join(process.env.HOME, "d".repeat(WANT - deeper(1) + 1));
+  assert.equal(securePath(BASE).length, WANT, "the store path must sit in the window");
+
+  const envelope = resetTheKeyring();
+  const inbox = writeInbox(entry(SECRET, "second"));
+
+  const store = createSecretStore({ baseUrl: BASE });
+  assert.equal(store.getSecret(SID), SECRET, "the inbox is still served in memory");
+  assert.equal(fs.existsSync(inbox), true, "the inbox must NOT be shredded");
+  assert.equal(fs.readFileSync(securePath(BASE), "utf8"), envelope, "the unreadable store stays put, byte-identical");
+  assert.deepEqual(fs.readdirSync(path.dirname(inbox)).sort(), ["secrets.enc.json", "secrets.json"],
+    "no half-done salvage, and nothing written over the store");
+});
+
+test("with every salvage name already taken, nothing is absorbed either", () => {
+  const envelope = resetTheKeyring();
+  const inbox = writeInbox(entry(SECRET, "second"));
+  // Every `.unreadable[-N]` name occupied by an earlier salvage. The backstop must
+  // refuse the absorb rather than pick one to overwrite.
+  const taken = new Map();
+  for (let n = 1; n <= 50; n++) {
+    const p = `${securePath(BASE)}.unreadable${n > 1 ? `-${n}` : ""}`;
+    taken.set(p, `salvaged envelope ${n}`);
+    fs.writeFileSync(p, taken.get(p));
+  }
+
+  assert.equal(createSecretStore({ baseUrl: BASE }).getSecret(SID), SECRET);
+  assert.equal(fs.existsSync(inbox), true, "the inbox must NOT be shredded");
+  assert.equal(fs.readFileSync(securePath(BASE), "utf8"), envelope, "the unreadable store stays put");
+  for (const [p, want] of taken) assert.equal(fs.readFileSync(p, "utf8"), want, `${path.basename(p)} must be untouched`);
 });
 
 test("a corrupt inbox is reported, not shredded", () => {

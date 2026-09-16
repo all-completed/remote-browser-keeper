@@ -236,6 +236,14 @@ nothing is silently written in the clear: the inbox is left as the single copy, 
 cannot be read (corrupt, or an envelope this machine holds no key for) is logged as such
 rather than read as "no secrets held" — see `readJsonState` in `src/securestore.js`.
 
+An unreadable store is also never **written over**. A reset login keyring (or a reset
+Windows profile, or a store copied from another machine) leaves the old envelope
+undecryptable while encryption itself still works — those bytes come back if the key
+does, so before absorbing an inbox on top of them the Keeper moves them aside to
+`secrets.enc.json.unreadable` (`-2`, `-3`… when one is already parked there) and logs
+where they went. To recover: restore the OS key they were encrypted with, then **merge**
+them back rather than renaming the file over the newer store.
+
 ### Saved cards for unattended auto-fill — stored **only in the synced vault**
 
 > **Cards live only in the synced vault now (no local `cards.json`).** At runtime the
