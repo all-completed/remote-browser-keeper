@@ -123,7 +123,9 @@ prod Keeper keep separate stores automatically:
 ~/.remote-browser-keeper/
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
-    ├── secrets.json                    # session-unlock secrets (by secret_id)
+    ├── secrets.enc.json                # session-unlock secrets (by secret_id), OS-encrypted
+    ├── secrets.json                    # plaintext provisioning inbox — absorbed into
+    │                                   # secrets.enc.json and removed on the next read
     │                                   # (no cards.json — saved cards live only in the synced vault)
     ├── device.json                     # this device's stable id (non-secret label)
     ├── fields.json                     # "forever" saved field values (this device only)
@@ -201,17 +203,18 @@ The API key stays in the main process: the History window is sandboxed under a
 The Keeper holds two kinds of sensitive data, both **per service base URL** (so dev
 and prod are isolated) under `~/.remote-browser-keeper/<base-url>/`:
 
-| | `secrets.json` | `cards.json` |
+| | `secrets.enc.json` | `cards.json` |
 |---|---|---|
 | **What** | session-encryption secrets, keyed by `secret_id` (`= sha256(secret)`) | saved payment cards for auto-fill |
 | **Used for** | answering the service's `secret_request` to unlock encrypted sessions (zero-knowledge) | unattended/assisted card `request_fill` |
-| **Written by** | external script `scripts/export_session_secret.py` (service repo) | the tray **Cards…** window (or hand-edit) |
-| **At rest** | **plaintext** file, `chmod 600` *(for now)* | **OS-encrypted** via `safeStorage` where a backend exists, else plaintext `chmod 600` |
+| **Written by** | the Keeper, absorbing the `secrets.json` inbox the external `scripts/export_session_secret.py` (service repo) writes | the tray **Cards…** window (or hand-edit) |
+| **At rest** | **OS-encrypted** via `safeStorage`, `chmod 600`; where no backend exists the plaintext inbox is kept instead (`chmod 600`) and that is logged | **OS-encrypted** via `safeStorage` where a backend exists, else plaintext `chmod 600` |
 | **Leaves the machine?** | only the secret value, over the authenticated Keeper WS, when the service asks for that `secret_id` | only field values, over the same WS, into the page; never logged |
 
-### `secrets.json` — session-unlock secrets
+### `secrets.enc.json` — session-unlock secrets
 
-`~/.remote-browser-keeper/<base-url>/secrets.json`, `chmod 600`. Shape:
+`~/.remote-browser-keeper/<base-url>/secrets.enc.json`, OS-encrypted, `chmod 600`. Shape
+(inside the envelope):
 `{ base_url, secrets: { <secret_id>: { secret, label, user_id, source } } }` where
 `secret_id = sha256(secret)`. When the service sends a `secret_request` for a
 `secret_id` (reopening an encrypted session without the API-key secret), the Keeper
@@ -219,10 +222,27 @@ looks it up here, verifies `sha256(secret) == secret_id`, and returns the secret
 over the WS. The service holds it **in memory only** for the session and never logs it.
 
 Provisioned by the service repo's `scripts/export_session_secret.py` (it extracts the
-secret from an API key and writes it here). Because that external writer can't use
-Electron `safeStorage`, `secrets.json` stays **plaintext at rest for now** — only the
-file permissions protect it. **Planned:** move provisioning into the Keeper so secrets
-get the same OS encryption as cards (service repo `docs/TODO.md`).
+secret from an API key and writes it out). Because that external writer can't use
+Electron `safeStorage`, it still writes plaintext — but to `secrets.json`, which is an
+**inbox, not the store**: the first Keeper read folds its entries into the encrypted
+`secrets.enc.json` and **removes it**, so no plaintext copy stands. The fold **merges**,
+so the external writer's fresh file can never drop a secret already held (dropping one
+would leave an encrypted session permanently unopenable). Nothing else changes for the
+script — keep writing `secrets.json` exactly as before.
+
+Where there is **no OS backend at all** (headless Linux, or running outside Electron)
+nothing is silently written in the clear: the inbox is left as the single copy, held to
+`chmod 600`, and the reason is logged once. Likewise a `secrets.enc.json` that exists but
+cannot be read (corrupt, or an envelope this machine holds no key for) is logged as such
+rather than read as "no secrets held" — see `readJsonState` in `src/securestore.js`.
+
+An unreadable store is also never **written over**. A reset login keyring (or a reset
+Windows profile, or a store copied from another machine) leaves the old envelope
+undecryptable while encryption itself still works — those bytes come back if the key
+does, so before absorbing an inbox on top of them the Keeper moves them aside to
+`secrets.enc.json.unreadable` (`-2`, `-3`… when one is already parked there) and logs
+where they went. To recover: restore the OS key they were encrypted with, then **merge**
+them back rather than renaming the file over the newer store.
 
 ### Saved cards for unattended auto-fill — stored **only in the synced vault**
 
@@ -267,9 +287,9 @@ zip, state, country } } } }`.
 > readable on disk. Only where there's **no backend** (e.g. headless Linux) does it
 > fall back to a `chmod 600` plaintext file. Reads handle both, so an existing plaintext
 > file **auto-migrates** to encrypted on the next save. If you'd still rather not keep
-> the CVV at rest, omit it and the Keeper prompts for it. (Secrets — `secrets.json` —
-> stay a filesystem vault for now; they're provisioned by an external script. See the
-> service repo `docs/TODO.md`.)
+> the CVV at rest, omit it and the Keeper prompts for it. (Session secrets get the same
+> OS encryption — `secrets.enc.json`; the plaintext `secrets.json` an external script
+> writes is absorbed into it and removed on the next read.)
 
 ### `vault.json` — the synced vault (saved fields across devices)
 
