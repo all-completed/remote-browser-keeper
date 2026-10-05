@@ -24,6 +24,7 @@ import { normalizeDeclineReason } from "./declinereason.js";
 import { requestDeadline } from "./deadline.js";
 import { createOutbox } from "./outbox.js";
 import { rendererUrl, refuseSender } from "./ipcsender.js";
+import { isOneTimeCode, autofillValues, savableValues } from "./onetimecode.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1312,8 +1313,6 @@ ipcMain.on("keeper:resize", (e, height) => {
   const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
   promptWin.setContentSize(w, ch);
 });
-// Silent fill when EVERY field of the request has a saved value marked "don't ask
-// again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
 // Unattended password generation: when EVERY field of a request is a `generate` field,
 // the Keeper creates each value itself (genpassword.js policy), fills them, and saves them
 // — no prompt. The generated password is never shown to the user, so it's saved to the
@@ -1340,7 +1339,8 @@ function tryAutofillGenerate(req) {
   for (const f of fields) {
     const value = shared.get(f.selector);
     values.push({ selector: f.selector, value });
-    if (host) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true); // auto-fill next time
+    // auto-fill next time — but never a one-time code (onetimecode.js)
+    if (host && !isOneTimeCode(f)) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true);
   }
   sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   if (scope === "vault" && host) void syncVaultNow();
@@ -1374,18 +1374,18 @@ function logGenerated(req, fields, shared, host, scope) {
   }
 }
 
+// Silent fill when EVERY field of the request has a saved value marked "don't ask
+// again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
+// A one-time code (field kind "code") always prompts, even if an earlier build saved one
+// under that selector: replaying a dead code silently pushes the login toward lockout.
 function tryAutofillFields(req) {
   const fields = Array.isArray(req.fields) ? req.fields : [];
   if (!fields.length) return false;
   let baseUrl;
   try { baseUrl = loadConfig().baseUrl; } catch { return false; }
   const host = hostFromUrl(req.url || "");
-  const values = [];
-  for (const f of fields) {
-    const s = getSaved(baseUrl, req.session_id, host, f.selector);
-    if (!s || !s.auto || s.value == null) return false; // not all auto-fillable → prompt
-    values.push({ selector: f.selector, value: s.value });
-  }
+  const values = autofillValues(fields, (selector) => getSaved(baseUrl, req.session_id, host, selector));
+  if (!values) return false;
   sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   recordHistory(req, "autofilled");
   console.log("[keeper] field autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
@@ -1394,6 +1394,7 @@ function tryAutofillFields(req) {
 
 // Saved field values: return any previously-saved values for this request's
 // fields (so the prompt prefills them), and save the submitted values per scope.
+// One-time codes are neither prefilled nor saved (onetimecode.js).
 ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
   if (!fromWindow(e, "keeper:saved-values", promptWin)) return [];
   try {
@@ -1403,6 +1404,7 @@ ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
     const host = hostFromUrl(req.url || "");
     const out = [];
     for (const f of (req.fields || [])) {
+      if (isOneTimeCode(f)) continue; // never prefill a stored (dead) one-time code
       const s = getSaved(baseUrl, req.session_id, host, f.selector);
       if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope, auto: s.auto });
     }
@@ -1420,7 +1422,9 @@ ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {
     const { baseUrl } = loadConfig();
     const host = hostFromUrl(req.url || "");
     let touchedVault = scope === "vault";
-    for (const v of values) {
+    // Forgetting is always allowed (it clears a code an earlier build saved); a save
+    // drops every code field, judged by the pending request's kinds, not the renderer's.
+    for (const v of (scope === "forget" ? values : savableValues(req.fields, values))) {
       if (!v || !v.selector) continue;
       if (scope === "forget") {
         // A forget may tombstone a vault entry, so it too needs a push.
