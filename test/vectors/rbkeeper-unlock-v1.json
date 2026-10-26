@@ -1,0 +1,22 @@
+{
+  "note": "rbkeeper-unlock-v1 shared test vector. All inputs are FIXTURES: seeds are sha256(\"rbkeeper-unlock-v1 fixture <label>\"). Regenerate with UPDATE_VECTORS=1 npm test.",
+  "ik_seed_hex": "a464a259acc6cd38319058e999878a9271ff733cca357cdcf5cadf437fa0a16d",
+  "ik_pub_b64": "pgpWJ6nItCzNWSIxnQMt08a/ZKseQLcFIxoXRtuXVEc=",
+  "headless_id": "rbk1-F576-79F4-2CFA",
+  "ek_ikm_hex": "612016d03e95109ea9880a7d12c9d1e1b0de36c8f12528bc73991796adaea71a",
+  "ek_priv_b64": "e/pn0aDHJpq/sluRk49Xr7gWPBOQIDV5NDQoMj07QCk=",
+  "eph_pub_b64": "K3OS8mNORAjn+d73Um6If4F4xwvekvNbsZ2rqaXYVys=",
+  "boot_id": "fixture-boot-0001",
+  "ts": 1800000000,
+  "nonce": "Zml4dHVyZS1ub25jZQ==",
+  "signed_bytes": "{\"boot_id\":\"fixture-boot-0001\",\"eph_pub\":\"K3OS8mNORAjn+d73Um6If4F4xwvekvNbsZ2rqaXYVys=\",\"headless_id\":\"rbk1-F576-79F4-2CFA\",\"nonce\":\"Zml4dHVyZS1ub25jZQ==\",\"ts\":1800000000,\"type\":\"unlock_request\"}",
+  "sig_b64": "6v3YFv7A/0aOgfm6numR5MBqlakY2hkgBSafVk5sTRvpv7PDPgEczY+RE1JBwQ1Z2QpqyHfiCmzNXeKCvMebDw==",
+  "code": "399E-1BF5",
+  "request_id": "fixture-request-0001",
+  "info": "rbkeeper-unlock-v1|rbk1-F576-79F4-2CFA|fixture-boot-0001",
+  "aad": "fixture-request-0001",
+  "plaintext": "{\"device_token\":\"fixture-device-token-not-a-secret\",\"issued_at\":1800000000,\"v\":1,\"vault\":{\"format\":\"pbkdf2-v2\",\"password\":\"fixture-vault-password-not-a-secret\",\"salt\":\"Zml4dHVyZS1zYWx0\"}}",
+  "sender_ekm_hex": "06767ddff03a1e8bff44bc4f62a597831894169cc26565d4d42cc877ffdde7d5",
+  "enc_b64": "Sy6LeRaScccpZitI5DIOiPU141acbk1iwDnZFviEYyw=",
+  "ciphertext_b64": "PENZripfdDW8Pq8DYiFxzmkEPpg0zZEZmbsjPE/88XOzbnhXLmvuKMMC6ftBUW8xUCDijA8z/R6KmVAm7jaHiTZCAb+g4/fZCUKTPGMXhPJAbHH5e0Ul0mfGIGWx9ZoBnsd3GL8EWo5jAQKJxo+SqGc01M2u5lk5iJpVBds77Wf6FHFLlh5jI+TxBvdFs6M8oitN/HFgd1xc3E/Iw83yWSQMaDyy9z7aYt9/s9UGBQrH4/4UExA9+nkuV9hbE5nRfN0+GDCgp4pw7Iw="
+}
