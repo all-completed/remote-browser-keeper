@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
-// Pin headless Keepers (rbkeeper-unlock-v1). A headless Keeper prints its public key on
-// first start; paste it here with a name. The pin is saved in the encrypted vault, so
+// Pin headless Keepers (rbkeeper-unlock-v1). `rb-keeperd enroll` prints a public key and
+// its rbk1-… fingerprint; paste the key here with a name, and confirm the fingerprint shown
+// matches before adding (spec §3). The pin is saved in the encrypted vault, so
 // every paired device trusts the same set, and only pinned Keepers can ask to unlock.
 export default function HeadlessApp() {
   const [list, setList] = useState({ loading: true });
@@ -9,6 +10,20 @@ export default function HeadlessApp() {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null); // { ok, text }
+  const [preview, setPreview] = useState(null); // { ok, fingerprint } | { ok:false, error }
+  const [confirmed, setConfirmed] = useState(false);
+
+  // Recompute the fingerprint whenever the pasted key changes; a new key needs a new confirm.
+  useEffect(() => {
+    setConfirmed(false);
+    const k = key.trim();
+    if (!k) { setPreview(null); return; }
+    let live = true;
+    window.keeperHeadless.preview(k)
+      .then((r) => { if (live) setPreview(r); })
+      .catch((e) => { if (live) setPreview({ ok: false, error: e.message }); });
+    return () => { live = false; };
+  }, [key]);
 
   const refresh = async () => {
     let r;
@@ -18,12 +33,12 @@ export default function HeadlessApp() {
   useEffect(() => { refresh(); }, []);
 
   const add = async () => {
-    if (busy) return;
+    if (busy || !confirmed || !preview?.ok) return;
     setBusy(true); setMsg(null);
     let r;
     try { r = await window.keeperHeadless.add(name.trim(), key.trim()); } catch (e) { r = { ok: false, error: e.message }; }
     setBusy(false);
-    if (r.ok) { setName(""); setKey(""); setMsg({ ok: true, text: `Added ${r.id}.` }); }
+    if (r.ok) { setName(""); setKey(""); setMsg({ ok: true, text: `Added ${r.fingerprint}.` }); }
     else setMsg({ ok: false, text: r.error || "Could not add it." });
     refresh();
   };
@@ -62,7 +77,8 @@ export default function HeadlessApp() {
                 border: "1px solid var(--border, #223)" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600 }}>{k.name}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted2)", fontFamily: "ui-monospace, Menlo, monospace" }}>{k.id}</div>
+                  <div style={{ fontSize: 12, fontFamily: "ui-monospace, Menlo, monospace" }}>{k.fingerprint || "—"}</div>
+                  <div style={{ fontSize: 10.5, color: "var(--muted2)", fontFamily: "ui-monospace, Menlo, monospace" }}>{k.id}</div>
                 </div>
                 <button onClick={() => remove(k)} disabled={busy}
                   style={{ padding: "6px 10px", borderRadius: 6, border: "none", background: "var(--danger, #ef6b6b)",
@@ -76,7 +92,18 @@ export default function HeadlessApp() {
           <textarea placeholder="Public key the Keeper printed on first start" value={key} rows={3} disabled={busy}
             spellCheck={false} onChange={(e) => setKey(e.target.value)}
             style={{ ...inputStyle, fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12.5, resize: "none" }} />
-          <button onClick={add} disabled={busy || !name.trim() || !key.trim()}
+          {preview && (preview.ok ? (
+            <>
+              <div style={{ fontSize: 12.5 }}>
+                Fingerprint: <span style={{ fontFamily: "ui-monospace, Menlo, monospace", fontWeight: 600 }}>{preview.fingerprint}</span>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: busy ? "default" : "pointer" }}>
+                <input type="checkbox" checked={confirmed} disabled={busy} onChange={(e) => setConfirmed(e.target.checked)} />
+                It matches the fingerprint <code>rb-keeperd enroll</code> printed
+              </label>
+            </>
+          ) : <p style={{ fontSize: 12.5, margin: 0, color: "var(--danger, #ef6b6b)" }}>{preview.error || "Not a public key."}</p>)}
+          <button onClick={add} disabled={busy || !name.trim() || !preview?.ok || !confirmed}
             style={{ padding: "10px 12px", borderRadius: 8, border: "none", cursor: busy ? "default" : "pointer",
               background: "var(--accent, #3b6cf0)", color: "#fff", fontSize: 14, fontWeight: 600, opacity: busy ? 0.6 : 1 }}>
             {busy ? "Saving…" : "Add"}
@@ -88,7 +115,7 @@ export default function HeadlessApp() {
           )}
 
           <p style={{ textAlign: "center", maxWidth: 360, fontSize: 11.5, color: "var(--muted2)", lineHeight: 1.5, margin: "4px auto 0" }}>
-            Check the fingerprint (rbk1-…) matches what the Keeper printed. Each restart then shows an Approve / Deny
+            Only add a key whose fingerprint (rbk1-…) matches what the Keeper printed. Each restart then shows an Approve / Deny
             window here; nothing is approved automatically.
           </p>
         </div>

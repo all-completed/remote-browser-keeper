@@ -1233,8 +1233,10 @@ function currentUnlock() {
   };
 }
 
-// Approve: mint this boot's secret-less device token, revoke the daemon's older ones,
-// seal { vault key, token } to the boot's ephemeral key, and send only the sealed box.
+// Approve (spec §5): revoke the daemon's earlier tokens, mint this boot's secret-less
+// device token, seal { vault key, token } to the boot's ephemeral key, and send only the
+// sealed box. Revoking FIRST matters: the service keeps at most 8 device records and
+// evicts the oldest, so enrolling first could push out the owner's phone (spec §7).
 async function approveUnlock(requestId) {
   const u = pendingUnlocks.get(requestId);
   if (!u) return { ok: false, error: "This request is no longer pending." };
@@ -1248,8 +1250,8 @@ async function approveUnlock(requestId) {
     const vaultKey = loadVaultKey(cfg.baseUrl);
     if (!vaultKey) throw new Error("This Keeper holds no vault key yet — sync or pair it first.");
     if (!connected) throw new Error("Not connected to the service — try again once connected.");
+    const revoked = await revokeOlderHeadless(cfg, u.name);
     minted = await enrollHeadlessDevice(cfg, { name: u.name, bootId: u.bootId, appVersion: app.getVersion() });
-    const revoked = await revokeOlderHeadless(cfg, u.name, minted.deviceId);
     const payload = buildUnlockPayload({ vaultKey, deviceToken: minted.token });
     const sealed = await sealUnlock({ ephPub: u.ephPub, headlessId: u.headlessId, bootId: u.bootId, requestId, payload });
     if (!pendingUnlocks.has(requestId)) throw new Error("The request was resolved elsewhere meanwhile.");
@@ -1379,11 +1381,26 @@ ipcMain.handle("headless:list", async (e) => {
   if (!fromWindow(e, "headless:list", headlessWin)) return { ok: false };
   if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
   const keepers = Object.entries(activePins(headlessPins))
-    .map(([id, p]) => ({ id, name: p.name, added_at: p.added_at || null }))
+    .map(([id, p]) => {
+      const key = parsePublicKey(p.ed25519_pub);
+      return { id, name: p.name, fingerprint: key ? key.fingerprint : null, added_at: p.added_at || null };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
   return { ok: true, keepers };
 });
 
+// The fingerprint of a pasted key, for the owner to compare with `rb-keeperd enroll`
+// before adding it (spec §3 step 2). Public data only.
+ipcMain.handle("headless:preview", async (e, { publicKey } = {}) => {
+  if (!fromWindow(e, "headless:preview", headlessWin)) return { ok: false };
+  const key = parsePublicKey(publicKey);
+  if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
+});
+
+// Spec §3 steps 3–4: register with the service (which computes the id itself; it must
+// match ours), then pin the key in the vault and sync. The renderer only calls this after
+// the owner confirmed the fingerprint.
 ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
   if (!fromWindow(e, "headless:add", headlessWin)) return { ok: false };
   const nm = String(name || "").trim();
@@ -1397,23 +1414,23 @@ ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
   // Approving revokes every older token of the same name, so two daemons sharing a
   // name would keep revoking each other.
   if (!same && Object.values(active).some((p) => p.name === nm)) return { ok: false, error: `"${nm}" is already in use — pick another name or remove that one.` };
+  let cfg;
+  try { cfg = loadConfig(); } catch (err) { return { ok: false, error: err.message }; }
+  try {
+    await registerHeadless(cfg, { name: nm, pub: key.pub });
+  } catch (err) {
+    return { ok: false, error: `Not added: ${err.message}.` };
+  }
+  console.log(unlockLogLine("registered", { headless_id: key.id, name: nm }));
   if (!same) {
     const { id, entry } = pinEntry({ name: nm, pub: key.pub });
     headlessPins = { ...headlessPins, [id]: entry };
     console.log(unlockLogLine("pinned", { headless_id: id, name: nm }));
   }
   if (!(await syncVaultNow())) {
-    return { ok: false, id: key.id, error: "Pinned here, but the vault sync failed, so other devices don't have it yet. It is retried with the next sync; Add again to retry now." };
+    return { ok: false, id: key.id, fingerprint: key.fingerprint, error: "Registered and pinned here, but the vault sync failed, so other devices don't have it yet. It is retried with the next sync; Add again to retry now." };
   }
-  let cfg;
-  try { cfg = loadConfig(); } catch (err) { return { ok: false, id: key.id, error: err.message }; }
-  try {
-    await registerHeadless(cfg, { id: key.id, name: nm, pub: key.pub });
-  } catch (err) {
-    return { ok: false, id: key.id, error: `Pinned in the vault, but ${err.message} — Add again to retry.` };
-  }
-  console.log(unlockLogLine("registered", { headless_id: key.id, name: nm }));
-  return { ok: true, id: key.id };
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
 });
 
 ipcMain.handle("headless:remove", async (e, { id } = {}) => {

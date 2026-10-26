@@ -42,11 +42,11 @@ remote-browser-keeper/
 | `declinereason.js` | The optional note a user attaches when **declining** (`DECLINE_PRESETS`, `DECLINE_REASON_MAX`, `normalizeDeclineReason`). Shared by the prompt UI and the main process, which re-normalizes whatever the renderer sends. Plain text meant for the agent — never a value. |
 | `onetimecode.js` | **One-time codes (field kind `code`) are never saved and never replayed** (issue #24): `isOneTimeCode`, `autofillValues` (the silent-fill decision — any code field sends the request to the prompt, even if an earlier build stored one) and `savableValues` (what `keeper:save-fields` may store — never a code, judged by the pending request's kinds). Pure; shared by the main process and the prompt, which hides the save control for a codes-only request. |
 | `ipcsender.js` | **Who may send a given IPC message.** `rendererUrl(page, …)` is the single definition of "one of our own documents" — used both to load a window and to check that a message really came from it; `refuseSender(sender, allowed)` is the decision. Pure; see [Windows & IPC](#windows--ipc). |
-| `headless.js` | **Headless Keepers** (rbkeeper-unlock-v1, issue #26): vault pins (`headless_keepers`), Ed25519 verification of an `unlock_request`, the replay guard, the comparison code, the HPKE seal of the unlock payload, and the service calls (register / delete a headless Keeper, enroll its secret-less boot token, revoke older ones). Pure apart from the injected `fetch`; see [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md). |
+| `headless.js` | **Headless Keepers** (rbkeeper-unlock-v1, issue #26): the `hk1_` id and `rbk1-` fingerprint of a daemon key, vault pins (`headless_keepers`), Ed25519 verification of an `unlock_request`, the replay guard, the comparison code, the HPKE seal of the unlock payload, and the service calls (register / delete a headless Keeper, revoke older boot tokens, enroll the new one with `secret_bound: false`). Pure apart from the injected `fetch`; see [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md). |
 | `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`, `onExpired`/`reportExpired`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
-| `headless-preload.cjs` | `contextBridge` for the **Headless Keepers** window: `list`, `add(name, publicKey)`, `remove(id)`. |
+| `headless-preload.cjs` | `contextBridge` for the **Headless Keepers** window: `list`, `preview(publicKey)` (id + fingerprint), `add(name, publicKey)`, `remove(id)`. |
 | `unlock-preload.cjs` | `contextBridge` for the **Headless Keeper restarted** (Approve / Deny) window: `get`, `approve(requestId)`, `deny(requestId)`, `onChanged`. |
 
 Preloads are `.cjs` because the app is ESM (`"type": "module"`) and Electron
@@ -70,12 +70,14 @@ Two more windows, built by vite from `ui/` like Settings:
 
 - **Headless Keepers…** (tray) — `ui/headless.html` + `ui/apps/HeadlessApp.jsx`: the
   pinned headless Keepers, and **Add headless Keeper** (a name + the daemon's Ed25519
-  public key). The pin is written into the vault blob (`headless_keepers`) and synced
-  **before** the service is told about the id.
+  public key). The window shows the key's `rbk1-…` fingerprint, and *Add* stays disabled
+  until the owner confirms it matches the daemon's. Add registers the key with the service,
+  checks that the service's `headless_id` equals the local one, then pins it in the vault
+  blob (`headless_keepers`) and syncs.
 - **Headless Keeper restarted** — `ui/unlock.html` + `ui/apps/UnlockApp.jsx`: opened
   (always on top) when a verified `unlock_request` arrives. It shows the pinned name, the
   restart time and the comparison code, and offers **Deny** / **Approve**. Nothing is ever
-  approved without a click; the window closes on `unlock_resolved` or after 10 minutes.
+  approved without a click; the window closes on `unlock_resolved` or after about 5 minutes.
 
 The protocol, the pins and the failure behaviour are in
 [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md).

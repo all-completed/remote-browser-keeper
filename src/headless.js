@@ -16,8 +16,10 @@
 // signature fails against the pinned key, is never shown as approvable.
 //
 // This module is pure (no electron) so all of it can be tested offline. The byte-level
-// rules shared with the daemon (Part 3) are in docs/rbkeeper-unlock-v1.md and pinned by
-// test/vectors/rbkeeper-unlock-v1.json.
+// rules shared with the daemon (Part 3) are the merged contract in
+// vasyaod/remote-browser-service docs/rbkeeper-unlock-v1.md (summarised for this side in
+// docs/rbkeeper-unlock-v1.md here), and its vectors are vendored verbatim as
+// test/vectors/rbkeeper-unlock-v1-vectors.json.
 import crypto from "node:crypto";
 import { CipherSuite, HkdfSha256 } from "@hpke/core";
 import { Chacha20Poly1305 } from "@hpke/chacha20poly1305";
@@ -25,21 +27,27 @@ import { DhkemX25519HkdfSha256 } from "@hpke/dhkem-x25519";
 import { mergeFieldMaps } from "./vault.js";
 
 export const PROTOCOL = "rbkeeper-unlock-v1";
-// How far a request's `ts` may sit from this clock. The service enforces ±120 s on
-// arrival. This side only has to refuse a request that was clearly held back and replayed
-// later, so it allows for desktop clock skew and a request that waited in the relay.
-export const MAX_SKEW_SEC = 15 * 60;
-// How long an unlock window stays up (the service resolves the request at 10 min too).
-export const UNLOCK_TIMEOUT_MS = 10 * 60 * 1000;
+// How far a request's `ts` may sit from this clock (spec §5 step 4: |now − ts| ≤ 720 s).
+// The service enforces ±120 s on arrival. This is defence in depth against a service that
+// holds a request back and replays it later.
+export const MAX_SKEW_SEC = 720;
+// How long an unlock window stays up. The service times a pending request out after about
+// 5 minutes (spec §6) and sends unlock_resolved; this is the fallback if that never comes.
+export const UNLOCK_TIMEOUT_MS = 5 * 60 * 1000;
 // The fields the daemon signs, and nothing else. The service ADDS request_id and name
 // after signing. Naming the signed set explicitly means no unsigned field can ride along
 // as if it had been signed.
 export const SIGNED_FIELDS = ["type", "headless_id", "boot_id", "eph_pub", "ts", "nonce"];
+// Everything a relayed frame may carry: the signed set, the signature, and the two fields
+// the service adds. Any other field makes the frame invalid (spec §4).
+const FRAME_FIELDS = new Set([...SIGNED_FIELDS, "sig", "request_id", "name"]);
 
 const NAME_RE = /^[A-Za-z0-9._-]{1,32}$/;
-const BOOT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
-const ID_RE = /^rbk1-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/;
-const NONCE_RE = /^[A-Za-z0-9+/=_-]{8,128}$/;
+// spec §2: the lowercase UUID from /proc/sys/kernel/random/boot_id (36 chars)
+const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// spec §3: "hk1_" + lowercase_hex(SHA-256(ed25519_pub_raw))[:32]
+const ID_RE = /^hk1_[0-9a-f]{32}$/;
+const ASCII_RE = /^[\x00-\x7f]*$/;
 
 // ---------- encodings ----------
 
@@ -79,15 +87,33 @@ const sha256 = (...parts) => {
   for (const p of parts) h.update(p);
   return h.digest();
 };
-const groups = (hex) => hex.match(/.{4}/g).join("-");
+const groups = (s) => s.match(/.{4}/g).join("-");
 
-// rbk1-XXXX-XXXX-XXXX: the first 6 bytes of SHA-256(raw Ed25519 public key). It is the
-// daemon's `headless_id` and what the owner compares when adding the daemon.
-export function fingerprint(pub) {
-  return "rbk1-" + groups(sha256(pub).subarray(0, 6).toString("hex").toUpperCase());
+// RFC 4648 base32 (A–Z, 2–7), unpadded.
+function base32(bytes) {
+  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0, acc = 0, out = "";
+  for (const byte of bytes) {
+    acc = (acc << 8) | byte;
+    bits += 8;
+    while (bits >= 5) { out += A[(acc >>> (bits - 5)) & 31]; bits -= 5; }
+    acc &= (1 << bits) - 1;
+  }
+  if (bits > 0) out += A[(acc << (5 - bits)) & 31];
+  return out;
 }
 
-// XXXX-XXXX: the first 4 bytes of SHA-256(eph_pub raw ‖ utf8(boot_id)). Both ends show
+// The daemon's id on the wire and the key of its vault pin (spec §3):
+// "hk1_" + lowercase_hex(SHA-256(raw Ed25519 public key))[:32].
+export const headlessId = (pub) => "hk1_" + sha256(pub).toString("hex").slice(0, 32);
+
+// What the owner compares with `rb-keeperd enroll` when adding the daemon (spec §3):
+// "rbk1-" + the first 12 base32 characters of SHA-256(raw public key), in groups of 4.
+export function fingerprint(pub) {
+  return "rbk1-" + groups(base32(sha256(pub)).slice(0, 12));
+}
+
+// XXXX-XXXX: the first 4 bytes of SHA-256(eph_pub raw ‖ ascii(boot_id)). Both ends show
 // it. A relay that swapped the EK would change it.
 export function comparisonCode(ephPub, bootId) {
   return groups(sha256(ephPub, Buffer.from(String(bootId), "utf8")).subarray(0, 4).toString("hex").toUpperCase());
@@ -102,12 +128,13 @@ export const unlockInfo = (headlessId, bootId) => Buffer.from(`${PROTOCOL}|${hea
 const SPKI_ED25519 = Buffer.from("302a300506032b6570032100", "hex");
 
 // Parse what the owner pasted: the daemon's base64 Ed25519 public key (32 raw bytes).
-// Returns { pub, id } or null.
+// Returns { pub, id, fingerprint } or null. Public data only: the owner is shown the
+// fingerprint and must confirm it before the key is pinned (spec §3 step 2).
 export function parsePublicKey(text) {
   const pub = unb64(String(text || "").trim(), 32);
   if (!pub) return null;
   try { crypto.createPublicKey({ key: Buffer.concat([SPKI_ED25519, pub]), format: "der", type: "spki" }); } catch { return null; }
-  return { pub, id: fingerprint(pub) };
+  return { pub, id: headlessId(pub), fingerprint: fingerprint(pub) };
 }
 
 export function ed25519Verify(pub, msg, sig) {
@@ -128,11 +155,11 @@ export function signedBytes(msg) {
 
 export const isValidName = (name) => typeof name === "string" && NAME_RE.test(name);
 
-// A new pin, keyed by the key's fingerprint. Entries merge last-write-wins by
+// A new pin, keyed by the key's headless_id. Entries merge last-write-wins by
 // updated_at like every other vault collection, and a removal is a tombstone.
 export function pinEntry({ name, pub, now = new Date() }) {
   const at = now.toISOString();
-  return { id: fingerprint(pub), entry: { name, ed25519_pub: b64(pub), added_at: at, updated_at: at } };
+  return { id: headlessId(pub), entry: { name, ed25519_pub: b64(pub), added_at: at, updated_at: at } };
 }
 export const pinTombstone = (now = new Date()) => ({ deleted: true, updated_at: now.toISOString() });
 export const mergeHeadlessPins = (remote, local) => mergeFieldMaps(remote || {}, local || {});
@@ -142,7 +169,7 @@ export function activePins(pins) {
   for (const [id, e] of Object.entries(pins || {})) {
     if (!e || e.deleted || !isValidName(e.name)) continue;
     const pub = unb64(e.ed25519_pub, 32);
-    if (!pub || fingerprint(pub) !== id) continue; // a pin whose key and id disagree is ignored
+    if (!pub || headlessId(pub) !== id) continue; // a pin whose key and id disagree is ignored
     out[id] = e;
   }
   return out;
@@ -155,21 +182,32 @@ export function activePins(pins) {
 // or { ok: false, reason } with reason one of malformed | unknown | bad-signature | stale.
 // `name` always comes from the PIN. The service's `name` is only a label and is never
 // trusted.
+//
+// Malformed (spec §2, §4): a field outside the signed six + sig + request_id + name, a
+// missing field, a non-ASCII string, a `ts` that is not a non-negative integer, or a
+// value of the wrong shape (hk1_ id, UUID boot_id, 32-byte eph_pub, 16-byte nonce,
+// 64-byte sig).
 export function verifyUnlockRequest(msg, pins, { now = Date.now() } = {}) {
-  if (!msg || msg.type !== "unlock_request") return { ok: false, reason: "malformed" };
-  const { headless_id: headlessId, boot_id: bootId, request_id: requestId, ts, nonce } = msg;
+  if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.type !== "unlock_request") return { ok: false, reason: "malformed" };
+  for (const [k, v] of Object.entries(msg)) {
+    if (!FRAME_FIELDS.has(k)) return { ok: false, reason: "malformed" };
+    if (k === "ts") continue;
+    if (typeof v !== "string" || !ASCII_RE.test(v)) return { ok: false, reason: "malformed" };
+  }
+  const { headless_id: id, boot_id: bootId, request_id: requestId, ts } = msg;
   const ephPub = unb64(msg.eph_pub, 32);
+  const nonce = unb64(msg.nonce, 16);
   const sig = unb64(msg.sig, 64);
-  if (typeof headlessId !== "string" || !ID_RE.test(headlessId) || typeof bootId !== "string" || !BOOT_ID_RE.test(bootId)
-    || typeof requestId !== "string" || !requestId || requestId.length > 128 || !Number.isSafeInteger(ts)
-    || typeof nonce !== "string" || !NONCE_RE.test(nonce) || !ephPub || !sig) {
+  if (typeof id !== "string" || !ID_RE.test(id) || typeof bootId !== "string" || !BOOT_ID_RE.test(bootId)
+    || typeof requestId !== "string" || !requestId || requestId.length > 128 || !Number.isSafeInteger(ts) || ts < 0
+    || !ephPub || !nonce || !sig) {
     return { ok: false, reason: "malformed" };
   }
-  const pin = activePins(pins)[headlessId];
+  const pin = activePins(pins)[id]; // activePins already dropped a pin whose key does not derive this id
   if (!pin) return { ok: false, reason: "unknown" };
   if (!ed25519Verify(unb64(pin.ed25519_pub, 32), signedBytes(msg), sig)) return { ok: false, reason: "bad-signature" };
   if (Math.abs(Math.floor(now / 1000) - ts) > MAX_SKEW_SEC) return { ok: false, reason: "stale" };
-  return { ok: true, headlessId, bootId, requestId, ephPub, ts, nonce, name: pin.name, code: comparisonCode(ephPub, bootId) };
+  return { ok: true, headlessId: id, bootId, requestId, ephPub, ts, nonce: msg.nonce, name: pin.name, code: comparisonCode(ephPub, bootId) };
 }
 
 // Requests already seen in this run, by nonce and by request_id. The service rejects
@@ -245,10 +283,17 @@ async function call(cfg, method, p, body, fetchImpl) {
 }
 
 // Register a pinned daemon with the service, so its WS is accepted and its requests are
-// relayed. Idempotent: the same id + key again is a retry.
-export async function registerHeadless(cfg, { id, name, pub }, { fetchImpl = fetch } = {}) {
-  const r = await call(cfg, "POST", "/api/keeper/headless", { id, name, ed25519_pub: b64(pub) }, fetchImpl);
-  if (!r.ok) throw new Error(`registering with the service failed (HTTP ${r.status})`);
+// relayed (spec §3 step 3). The body is {name, ed25519_pub} only: the service computes
+// headless_id itself. Its answer must equal our own derivation; a service that names a
+// different id is refused. Returns the id. Idempotent: the same key again is a retry.
+export async function registerHeadless(cfg, { name, pub }, { fetchImpl = fetch } = {}) {
+  const r = await call(cfg, "POST", "/api/keeper/headless", { name, ed25519_pub: b64(pub) }, fetchImpl);
+  if (!r.ok) throw new Error(r.status === 409
+    ? "this key is already registered to another account (HTTP 409)"
+    : `registering with the service failed (HTTP ${r.status})`);
+  const id = headlessId(pub);
+  if (!r.data || r.data.headless_id !== id) throw new Error("the service returned a different headless_id for this key");
+  return id;
 }
 
 export async function deleteHeadless(cfg, id, { fetchImpl = fetch } = {}) {
@@ -265,13 +310,14 @@ export class SecretBoundToken extends Error {
 
 export const headlessDeviceName = (name, bootId) => `headless:${name}:${bootId}`;
 
-// Mint the boot's device token. It has to be SECRET-LESS: the daemon gets the vault key
+// Mint the boot's device token (spec §7: body {device_name, platform:"headless",
+// app_version, secret_bound:false}). It has to be SECRET-LESS: the daemon gets the vault key
 // through the sealed payload and must not hold the account's session secret too. A
 // response that does not say `secret_bound: false` is treated as bound. The just-minted
 // device is then revoked and SecretBoundToken is thrown, so nothing gets sealed.
 export async function enrollHeadlessDevice(cfg, { name, bootId, appVersion }, { fetchImpl = fetch } = {}) {
   const r = await call(cfg, "POST", "/api/keeper/devices/enroll", {
-    device_name: headlessDeviceName(name, bootId), platform: "headless", ...(appVersion ? { app_version: appVersion } : {}), secret_less: true,
+    device_name: headlessDeviceName(name, bootId), platform: "headless", ...(appVersion ? { app_version: appVersion } : {}), secret_bound: false,
   }, fetchImpl);
   const deviceId = r.data && r.data.device && r.data.device.device_id;
   if (!r.ok || !r.data || typeof r.data.token !== "string" || !r.data.token || typeof deviceId !== "string") {
@@ -289,9 +335,11 @@ export async function revokeDevice(cfg, deviceId, { fetchImpl = fetch } = {}) {
   if (!r.ok && r.status !== 404) throw new Error(`revoking a device failed (HTTP ${r.status})`);
 }
 
-// Revoke every earlier `headless:<name>:*` device except `keepId` (the one just minted),
-// so one daemon holds at most one live token. Returns how many were revoked.
-export async function revokeOlderHeadless(cfg, name, keepId, { fetchImpl = fetch } = {}) {
+// Revoke every `headless:<name>:*` device (except `keepId`, if given), so one daemon
+// holds at most one live token. Approve calls this BEFORE enrolling (spec §5, §7): the
+// service keeps at most 8 device records and evicts the oldest, so one stale record per
+// boot would otherwise push out the owner's phone. Returns how many were revoked.
+export async function revokeOlderHeadless(cfg, name, keepId = null, { fetchImpl = fetch } = {}) {
   const r = await call(cfg, "GET", "/api/keeper/devices", undefined, fetchImpl);
   if (!r.ok || !r.data || !Array.isArray(r.data.devices)) throw new Error(`listing devices failed (HTTP ${r.status})`);
   const prefix = `headless:${name}:`;
