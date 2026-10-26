@@ -25,6 +25,11 @@ import { requestDeadline } from "./deadline.js";
 import { createOutbox } from "./outbox.js";
 import { rendererUrl, refuseSender } from "./ipcsender.js";
 import { isOneTimeCode, autofillValues, savableValues } from "./onetimecode.js";
+import {
+  UNLOCK_TIMEOUT_MS, parsePublicKey, isValidName, pinEntry, pinTombstone, mergeHeadlessPins, activePins,
+  verifyUnlockRequest, createReplayGuard, buildUnlockPayload, sealUnlock, registerHeadless, deleteHeadless,
+  SecretBoundToken, enrollHeadlessDevice, revokeDevice, revokeOlderHeadless, unlockLogLine,
+} from "./headless.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -264,6 +269,16 @@ function connect() {
     if (msg.type === "ping") { safeSend({ type: "pong" }); return; }
     if (msg.type === "pong") { return; } // heartbeat reply (already counted above)
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
+    // A headless Keeper restarted and asks for the vault key (headless.js). Only ever
+    // shown for a pinned daemon with a valid signature; never answered without the user.
+    if (msg.type === "unlock_request" && msg.request_id) { void handleUnlockRequest(msg); return; }
+    if (msg.type === "unlock_resolved" && msg.request_id) {
+      if (pendingUnlocks.has(msg.request_id)) {
+        console.log(unlockLogLine("resolved-elsewhere", { request_id: msg.request_id, status: msg.status }));
+        finishUnlock(msg.request_id);
+      }
+      return;
+    }
     // Another keeper (or a timeout) already resolved this request server-side —
     // dismiss our prompt for it so the user isn't asked twice. A queued answer for it is
     // dropped rather than reported: nobody is waiting for it, and it holds values.
@@ -462,30 +477,54 @@ async function resolveVaultKey(cfg) {
 // Merge the decrypted remote vault blob with this device's local state: "vault"-scoped
 // saved fields AND saved cards (each merged per-entry, last-write-wins with tombstones).
 // Unknown collections are preserved so a newer client can add more without loss.
+// The pinned headless Keepers ({ <id>: { name, ed25519_pub, added_at, updated_at } }).
+// Held in memory only: the vault is where they live, and they are known only once a
+// vault sync has merged them in (pinsLoaded). Until then no unlock request is shown.
+let headlessPins = {};
+let pinsLoaded = false;
 function mergeVaultBlob(baseUrl, remoteBlob) {
   const fields = mergeRemoteVault(baseUrl, remoteBlob.fields || {});
   const c = mergeRemoteCards(baseUrl, remoteBlob.cards || {}, remoteBlob.cardsMeta || {});
-  return { ...remoteBlob, fields, cards: c.cards, cardsMeta: c.cardsMeta };
+  const out = { ...remoteBlob, fields, cards: c.cards, cardsMeta: c.cardsMeta };
+  // Headless Keeper pins (headless.js) live ONLY in the vault: the vault is the one place
+  // the service can neither read nor rewrite, which is what makes a pin trustworthy.
+  const pins = mergeHeadlessPins(remoteBlob.headless_keepers, headlessPins);
+  if (Object.keys(pins).length) out.headless_keepers = pins;
+  headlessPins = pins;
+  pinsLoaded = true;
+  return out;
 }
 
 // Sync the vault (fields + cards) with the service: pull the remote blob, merge it into
 // the local caches (last-write-wins), and push the union back. The service only ever sees
 // opaque ciphertext (see vault.js). Best-effort — quietly no-ops without an API key.
-let vaultSyncing = false;
-async function syncVaultNow() {
-  if (vaultSyncing) return;
+// Resolves to whether this pass synced. A call made while a sync is running does not
+// start a second one: it marks a re-run and shares the running one. So a change made
+// mid-sync (a new headless pin) is still pushed, and a caller that awaits gets a
+// sync that started after its change.
+let vaultSyncing = null;
+let vaultResync = false;
+function syncVaultNow() {
+  if (vaultSyncing) { vaultResync = true; return vaultSyncing; }
+  vaultSyncing = (async () => {
+    let ok = false;
+    do { vaultResync = false; ok = await syncVaultOnce(); } while (vaultResync);
+    return ok;
+  })().finally(() => { vaultSyncing = null; });
+  return vaultSyncing;
+}
+async function syncVaultOnce() {
   let cfg;
-  try { cfg = loadConfig(); } catch { return; }
-  if (!cfg.apiKey) return;
-  vaultSyncing = true;
+  try { cfg = loadConfig(); } catch { return false; }
+  if (!cfg.apiKey) return false;
   try {
     const r = await resolveVaultKey(cfg);
-    if (r.transient) return;
+    if (r.transient) return false;
     if (r.repair) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault: this device needs to re-pair to get the vault password");
       vaultNeedsRepair = true;
       updateTray();
-      return;
+      return false;
     }
     vaultNeedsRepair = false;
     await syncVault(
@@ -498,6 +537,7 @@ async function syncVaultNow() {
     // Cards now live only in the synced vault — once it has them, remove any legacy
     // on-disk cards.json so nothing card-related persists locally.
     dropLegacyCardsFile(cfg.baseUrl);
+    return true;
   } catch (e) {
     if (e instanceof VaultKeyMismatch) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault:", e.message);
@@ -506,8 +546,8 @@ async function syncVaultNow() {
     } else {
       console.warn("[keeper] vault sync failed:", e.message);
     }
+    return false;
   } finally {
-    vaultSyncing = false;
     reportDeviceState(); // the sync just settled our vault state — publish it if it moved
   }
 }
@@ -1129,6 +1169,284 @@ function openVaultPwWindow() {
   vaultPwWin.on("closed", () => { vaultPwWin = null; });
 }
 
+// ---------- Headless Keepers (rbkeeper-unlock-v1 — headless.js, docs/rbkeeper-unlock-v1.md) ----------
+// A headless Keeper (a daemon on a server) holds no vault key at rest. On every boot it
+// asks this Keeper for one; the user approves it here, and the key travels sealed to that
+// boot's ephemeral key, so the service relaying it can't read it. Which daemons may ask
+// at all is decided by the pins in the vault, never by the service.
+
+// Requests verified and waiting for the user: request_id -> verified request + timer.
+const pendingUnlocks = new Map();
+const unlockReplay = createReplayGuard();
+
+async function handleUnlockRequest(msg) {
+  const requestId = String(msg.request_id).slice(0, 128);
+  if (pendingUnlocks.has(requestId)) return; // the service replays a pending request on reconnect
+  // Pins arrive with the first vault sync. Never judge a request against an empty set
+  // that only means "not synced yet".
+  if (!pinsLoaded) await syncVaultNow();
+  if (!pinsLoaded) {
+    console.warn(unlockLogLine("refused", { request_id: requestId, reason: "pins-unavailable" }));
+    return;
+  }
+  const v = verifyUnlockRequest(msg, headlessPins);
+  if (!v.ok) {
+    console.warn(unlockLogLine("refused", { request_id: requestId, headless_id: msg.headless_id, reason: v.reason }));
+    return;
+  }
+  if (pendingUnlocks.has(v.requestId)) return;
+  if (!unlockReplay.first("n:" + v.nonce, "r:" + v.requestId)) {
+    console.warn(unlockLogLine("refused", { request_id: v.requestId, headless_id: v.headlessId, reason: "replay" }));
+    return;
+  }
+  const now = Date.now();
+  const timer = setTimeout(() => {
+    console.log(unlockLogLine("expired", { request_id: v.requestId, name: v.name }));
+    finishUnlock(v.requestId);
+  }, UNLOCK_TIMEOUT_MS);
+  pendingUnlocks.set(v.requestId, { ...v, receivedAt: now, expiresAt: now + UNLOCK_TIMEOUT_MS, timer, busy: false });
+  console.log(unlockLogLine("received", { request_id: v.requestId, headless_id: v.headlessId, boot_id: v.bootId, name: v.name }));
+  updateTray();
+  openUnlockWindow();
+}
+
+// Drop a request (answered, resolved elsewhere, or expired) and move the window on.
+function finishUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return;
+  clearTimeout(u.timer);
+  pendingUnlocks.delete(requestId);
+  updateTray();
+  if (!unlockWin) return;
+  if (pendingUnlocks.size) unlockWin.webContents.send("unlock:changed");
+  else unlockWin.close();
+}
+
+// What the window shows: the oldest pending request. Identifiers, the pin's name and
+// the comparison code only — nothing secret is in a request.
+function currentUnlock() {
+  const u = pendingUnlocks.values().next().value;
+  if (!u) return null;
+  return {
+    request_id: u.requestId, name: u.name, headless_id: u.headlessId, boot_id: u.bootId,
+    restarted_at: u.ts * 1000, expires_at: u.expiresAt, code: u.code, waiting: pendingUnlocks.size,
+  };
+}
+
+// Approve (spec §5): revoke the daemon's earlier tokens, mint this boot's secret-less
+// device token, seal { vault key, token } to the boot's ephemeral key, and send only the
+// sealed box. Revoking FIRST matters: the service keeps at most 8 device records and
+// evicts the oldest, so enrolling first could push out the owner's phone (spec §7).
+async function approveUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return { ok: false, error: "This request is no longer pending." };
+  if (u.busy) return { ok: false, error: "Already working on it." };
+  u.busy = true;
+  let cfg = null;
+  let minted = null;
+  try {
+    cfg = loadConfig();
+    if (!cfg.apiKey) throw new Error("No API key configured.");
+    const vaultKey = loadVaultKey(cfg.baseUrl);
+    if (!vaultKey) throw new Error("This Keeper holds no vault key yet — sync or pair it first.");
+    if (!connected) throw new Error("Not connected to the service — try again once connected.");
+    const revoked = await revokeOlderHeadless(cfg, u.name);
+    minted = await enrollHeadlessDevice(cfg, { name: u.name, bootId: u.bootId, appVersion: app.getVersion() });
+    const payload = buildUnlockPayload({ vaultKey, deviceToken: minted.token });
+    const sealed = await sealUnlock({ ephPub: u.ephPub, headlessId: u.headlessId, bootId: u.bootId, requestId, payload });
+    if (!pendingUnlocks.has(requestId)) throw new Error("The request was resolved elsewhere meanwhile.");
+    if (!safeSend({ type: "unlock_response", request_id: requestId, enc: sealed.enc, ciphertext: sealed.ciphertext })) {
+      throw new Error("The connection dropped — nothing was sent. Try again.");
+    }
+    console.log(unlockLogLine("approved", { request_id: requestId, headless_id: u.headlessId, boot_id: u.bootId, name: u.name, revoked }));
+    finishUnlock(requestId);
+    return { ok: true };
+  } catch (e) {
+    // A token nobody received must not stay live.
+    if (minted) {
+      try { await revokeDevice(cfg, minted.deviceId); }
+      catch { console.warn(unlockLogLine("revoke-failed", { request_id: requestId, name: u.name })); }
+    }
+    u.busy = false;
+    const secretBound = e instanceof SecretBoundToken;
+    console.warn(unlockLogLine("approve-failed", { request_id: requestId, name: u.name, reason: secretBound ? "secret-bound-token" : "error" }));
+    return {
+      ok: false,
+      error: secretBound
+        ? "The service can't issue a secret-less device token yet, so nothing was sent."
+        : (e && e.message) || "Approve failed.",
+    };
+  }
+}
+
+function denyUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return { ok: false, error: "This request is no longer pending." };
+  if (u.busy) return { ok: false, error: "Already approving it." };
+  // Unsent, the service times the request out the same way, so drop it either way.
+  const sent = safeSend({ type: "unlock_response", request_id: requestId, denied: true });
+  console.log(unlockLogLine("denied", { request_id: requestId, name: u.name, status: sent ? "sent" : "unsent" }));
+  finishUnlock(requestId);
+  return { ok: true };
+}
+
+let unlockWin = null;
+function openUnlockWindow() {
+  if (unlockWin) { unlockWin.webContents.send("unlock:changed"); unlockWin.show(); unlockWin.focus(); return; }
+  if (!pendingUnlocks.size) return;
+  unlockWin = new BrowserWindow({
+    show: false,
+    width: 440,
+    height: 400,
+    resizable: false,
+    fullscreenable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: "Remote Browser Keeper — Headless Keeper restarted",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "unlock-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  unlockWin.setAlwaysOnTop(true, "screen-saver");
+  unlockWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  unlockWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  unlockWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(unlockWin, "unlock");
+  unlockWin.once("ready-to-show", () => { unlockWin.show(); unlockWin.focus(); });
+  // Closing the window is not an answer: the request stays pending (tray) until it is
+  // approved, denied, resolved elsewhere or expires.
+  unlockWin.on("closed", () => { unlockWin = null; });
+}
+
+ipcMain.handle("unlock:get", (e) => {
+  if (!fromWindow(e, "unlock:get", unlockWin)) return null;
+  return currentUnlock();
+});
+// Both answers name the request the user was looking at, so a request that arrived
+// meanwhile can't be approved in its place.
+ipcMain.handle("unlock:approve", async (e, { requestId } = {}) => {
+  if (!fromWindow(e, "unlock:approve", unlockWin)) return { ok: false };
+  return approveUnlock(String(requestId || ""));
+});
+ipcMain.handle("unlock:deny", (e, { requestId } = {}) => {
+  if (!fromWindow(e, "unlock:deny", unlockWin)) return { ok: false };
+  return denyUnlock(String(requestId || ""));
+});
+
+// Pinning: the owner pastes the public key the daemon printed and names it. The pin goes
+// into the vault (synced to every paired device), then the daemon is registered with the
+// service so its connection is accepted.
+let headlessWin = null;
+function openHeadlessWindow() {
+  if (headlessWin) { headlessWin.show(); headlessWin.focus(); return; }
+  headlessWin = new BrowserWindow({
+    width: 480,
+    height: 560,
+    resizable: true,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Headless Keepers",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "headless-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  headlessWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  headlessWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  headlessWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(headlessWin, "headless");
+  headlessWin.once("ready-to-show", () => { headlessWin.show(); headlessWin.focus(); });
+  headlessWin.on("closed", () => { headlessWin = null; });
+}
+
+// The pins are only known after a vault sync; changing them before would be blind.
+async function ensurePinsLoaded() {
+  if (!pinsLoaded) await syncVaultNow();
+  return pinsLoaded;
+}
+
+ipcMain.handle("headless:list", async (e) => {
+  if (!fromWindow(e, "headless:list", headlessWin)) return { ok: false };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
+  const keepers = Object.entries(activePins(headlessPins))
+    .map(([id, p]) => {
+      const key = parsePublicKey(p.ed25519_pub);
+      return { id, name: p.name, fingerprint: key ? key.fingerprint : null, added_at: p.added_at || null };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { ok: true, keepers };
+});
+
+// The fingerprint of a pasted key, for the owner to compare with `rb-keeperd enroll`
+// before adding it (spec §3 step 2). Public data only.
+ipcMain.handle("headless:preview", async (e, { publicKey } = {}) => {
+  if (!fromWindow(e, "headless:preview", headlessWin)) return { ok: false };
+  const key = parsePublicKey(publicKey);
+  if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
+});
+
+// Spec §3 steps 3–4: register with the service (which computes the id itself; it must
+// match ours), then pin the key in the vault and sync. The renderer only calls this after
+// the owner confirmed the fingerprint.
+ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
+  if (!fromWindow(e, "headless:add", headlessWin)) return { ok: false };
+  const nm = String(name || "").trim();
+  if (!isValidName(nm)) return { ok: false, error: "Name: 1–32 letters, digits, '.', '_' or '-'." };
+  const key = parsePublicKey(publicKey);
+  if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
+  const active = activePins(headlessPins);
+  const same = active[key.id];
+  if (same && same.name !== nm) return { ok: false, error: `This key is already pinned as "${same.name}". Remove it first.` };
+  // Approving revokes every older token of the same name, so two daemons sharing a
+  // name would keep revoking each other.
+  if (!same && Object.values(active).some((p) => p.name === nm)) return { ok: false, error: `"${nm}" is already in use — pick another name or remove that one.` };
+  let cfg;
+  try { cfg = loadConfig(); } catch (err) { return { ok: false, error: err.message }; }
+  try {
+    await registerHeadless(cfg, { name: nm, pub: key.pub });
+  } catch (err) {
+    return { ok: false, error: `Not added: ${err.message}.` };
+  }
+  console.log(unlockLogLine("registered", { headless_id: key.id, name: nm }));
+  if (!same) {
+    const { id, entry } = pinEntry({ name: nm, pub: key.pub });
+    headlessPins = { ...headlessPins, [id]: entry };
+    console.log(unlockLogLine("pinned", { headless_id: id, name: nm }));
+  }
+  if (!(await syncVaultNow())) {
+    return { ok: false, id: key.id, fingerprint: key.fingerprint, error: "Registered and pinned here, but the vault sync failed, so other devices don't have it yet. It is retried with the next sync; Add again to retry now." };
+  }
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
+});
+
+ipcMain.handle("headless:remove", async (e, { id } = {}) => {
+  if (!fromWindow(e, "headless:remove", headlessWin)) return { ok: false };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet." };
+  const hid = String(id || "");
+  if (!activePins(headlessPins)[hid]) return { ok: false, error: "Not pinned." };
+  headlessPins = { ...headlessPins, [hid]: pinTombstone() };
+  console.log(unlockLogLine("unpinned", { headless_id: hid }));
+  const synced = await syncVaultNow();
+  let cfg;
+  try { cfg = loadConfig(); await deleteHeadless(cfg, hid); }
+  catch (err) { return { ok: false, error: `Unpinned${synced ? "" : " here (vault sync pending)"}, but ${err.message}.` }; }
+  return synced ? { ok: true } : { ok: false, error: "Unpinned here and at the service, but the vault sync failed; it is retried with the next sync." };
+});
+
 let settingsWin = null;
 function openSettingsWindow() {
   if (settingsWin) { settingsWin.show(); settingsWin.focus(); return; }
@@ -1505,12 +1823,17 @@ function updateTray() {
       click: () => { lastUndelivered = null; updateTray(); },
     }, { type: "separator" }] : []),
     ...pendingMenuItems(),
+    ...(pendingUnlocks.size ? [{
+      label: `🔓 Headless Keeper waiting for approval (${pendingUnlocks.size})…`,
+      click: openUnlockWindow,
+    }, { type: "separator" }] : []),
     { label: "Cards…", click: openCardsWindow },
     { label: "Saved fields…", click: openSavedFieldsWindow },
     { label: "History…", click: openHistoryWindow },
     { type: "separator" },
     { label: "Pair phone…", click: openPairWindow },
     { label: "Set vault password…", click: openVaultPwWindow },
+    { label: "Headless Keepers…", click: openHeadlessWindow },
     { label: "Settings…", click: openSettingsWindow },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     // A device left on the v1 key model is a real exposure (v1's stored id IS the key),
