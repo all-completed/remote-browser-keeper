@@ -24,6 +24,8 @@ export default defineConfig({
         pair: resolve(__dirname, 'ui/pair.html'),
         vaultpw: resolve(__dirname, 'ui/vaultpw.html'),
         settings: resolve(__dirname, 'ui/settings.html'),
+        headless: resolve(__dirname, 'ui/headless.html'),
+        unlock: resolve(__dirname, 'ui/unlock.html'),
       },
     },
   },

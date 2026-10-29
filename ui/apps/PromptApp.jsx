@@ -7,6 +7,11 @@ import ProofImage from "../components/ProofImage.jsx";
 import Countdown from "../components/Countdown.jsx";
 import { Field } from "../components/Field.jsx";
 import { DECLINE_PRESETS, DECLINE_REASON_MAX, normalizeDeclineReason } from "../../src/declinereason.js";
+import { isOneTimeCode } from "../../src/onetimecode.js";
+
+const isCardField = (f) => String((f && f.field) || "").toLowerCase().startsWith("card-");
+// Card fields belong in the vault's cards; one-time codes are never saved (issue #24).
+const isSavableField = (f) => !isCardField(f) && !isOneTimeCode(f);
 
 export default function PromptApp() {
   const [req, setReq] = useState(getLatest());
@@ -88,8 +93,9 @@ export default function PromptApp() {
       if (!Array.isArray(saved) || !saved.length) {
         // No previously-saved value: default a (non-generate) field to the synced vault
         // when a vault key is held — generate is already defaulted above. The user can
-        // still switch to on-device or Don't save in the prompt.
-        if (!hasGen) {
+        // still switch to on-device or Don't save in the prompt. Not when nothing here
+        // can be saved (a codes-only request): that stays "Don't save".
+        if (!hasGen && reqFields.some(isSavableField)) {
           try { const s = await window.keeper.vaultStatus?.(); if (!cancelled && s && s.ok && s.hasKey) { setSaveScope("vault"); setDontAsk(true); } } catch { /* ignore */ }
         }
         return;
@@ -121,8 +127,11 @@ export default function PromptApp() {
   );
 
   const fields = Array.isArray(req.fields) ? req.fields : [];
-  const hasCard = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
-  const hasNonCard = fields.some((f) => !String((f && f.field) || "").toLowerCase().startsWith("card-"));
+  const hasCard = fields.some(isCardField);
+  // The save control is only for fields that can be saved: a request of one-time codes
+  // (or cards) has none, so it gets no "Save these values" at all.
+  const hasSavable = fields.some(isSavableField);
+  const hasCode = fields.some(isOneTimeCode);
   const showPicker = hasCard && Array.isArray(req.cards) && req.cards.length > 0;
 
   const setValue = (field, raw) => {
@@ -162,10 +171,11 @@ export default function PromptApp() {
     else if (pickedCardId && scope === "site") { try { window.keeper.rememberCardDomain(req.request_id, pickedCardId); } catch {} }
     const out = fields.map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
     // Save to secure storage (until restart / forever) before responding, while
-    // the pending request still exists in main. Card fields belong in cards.json.
-    if (saveScope) {
+    // the pending request still exists in main. Card fields belong in the vault's cards;
+    // one-time codes are never saved (main drops them too, whatever is sent).
+    if (saveScope && hasSavable) {
       const saveOut = fields
-        .filter((f) => !String((f && f.field) || "").toLowerCase().startsWith("card-"))
+        .filter(isSavableField)
         .map((f) => ({ selector: f.selector, value: submitVal(f.field, values[f.selector] || "") }));
       try { await window.keeper.saveFields(req.request_id, saveOut, saveScope, dontAsk); } catch {}
     }
@@ -218,8 +228,11 @@ export default function PromptApp() {
               onCancel={cancel}
             />
           ))}
-          {hasNonCard && (
-            <Field label={savedExisting ? "Saved value" : "Save these values"}>
+          {hasSavable && (
+            <Field
+              label={savedExisting ? "Saved value" : "Save these values"}
+              hint={hasCode ? "One-time codes are never saved" : undefined}
+            >
               <select
                 value={saveScope}
                 onChange={(e) => {
@@ -237,7 +250,7 @@ export default function PromptApp() {
               </select>
             </Field>
           )}
-          {hasNonCard && (saveScope === "session" || saveScope === "forever" || saveScope === "vault") && (
+          {hasSavable && (saveScope === "session" || saveScope === "forever" || saveScope === "vault") && (
             <label
               style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted2)", fontSize: 12.5, cursor: "pointer", marginTop: -6 }}
             >

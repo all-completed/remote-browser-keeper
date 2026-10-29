@@ -39,11 +39,17 @@ remote-browser-keeper/
 | `devicetoken.js` | Where that token lives — `device-token.json`, OS-encrypted like the card store, per base URL. Never touches the account key. |
 | `historyapi.js` | Client for the **service's** copy of the request history: `GET /api/sessions/fill-history` and `.../{request_id}/screenshot`. Never throws — an unreachable service returns `{ ok: false, error }`. |
 | `deadline.js` | Reads a request's **absolute deadline** off the `fill_request` frame (`expires_at`/`deadline`, or `created_at` + `timeout_s`); `null` when the frame carries none. Pure — the countdown and the expiry timer in `main.js` both hang off it. |
+| `outbox.js` | Holds a `fill_response` / `secret_response` the socket could not take and re-sends it when the link is back, so an answer given during an outage is not silently lost (issue #19). In memory only (it holds values), bounded by the request's own deadline, and the record of what has already been answered — a replayed `fill_request` must not prompt twice. Pure — the socket is injected. |
 | `historymerge.js` | Unions the local log with the service's list on `request_id` and tags each row `local` / `server` / `both`. Pure; see [Request history — one list from two](#request-history--one-list-from-two). |
 | `declinereason.js` | The optional note a user attaches when **declining** (`DECLINE_PRESETS`, `DECLINE_REASON_MAX`, `normalizeDeclineReason`). Shared by the prompt UI and the main process, which re-normalizes whatever the renderer sends. Plain text meant for the agent — never a value. |
+| `onetimecode.js` | **One-time codes (field kind `code`) are never saved and never replayed** (issue #24): `isOneTimeCode`, `autofillValues` (the silent-fill decision — any code field sends the request to the prompt, even if an earlier build stored one) and `savableValues` (what `keeper:save-fields` may store — never a code, judged by the pending request's kinds). Pure; shared by the main process and the prompt, which hides the save control for a codes-only request. |
+| `ipcsender.js` | **Who may send a given IPC message.** `rendererUrl(page, …)` is the single definition of "one of our own documents" — used both to load a window and to check that a message really came from it; `refuseSender(sender, allowed)` is the decision. Pure; see [Windows & IPC](#windows--ipc). |
+| `headless.js` | **Headless Keepers** (rbkeeper-unlock-v1, issue #26): the `hk1_` id and `rbk1-` fingerprint of a daemon key, vault pins (`headless_keepers`), Ed25519 verification of an `unlock_request`, the replay guard, the comparison code, the HPKE seal of the unlock payload, and the service calls (register / delete a headless Keeper, revoke older boot tokens, enroll the new one with `secret_bound: false`). Pure apart from the injected `fetch`; see [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md). |
 | `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`, `onExpired`/`reportExpired`. |
 | `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
 | `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
+| `headless-preload.cjs` | `contextBridge` for the **Headless Keepers** window: `list`, `preview(publicKey)` (id + fingerprint), `add(name, publicKey)`, `remove(id)`. |
+| `unlock-preload.cjs` | `contextBridge` for the **Headless Keeper restarted** (Approve / Deny) window: `get`, `approve(requestId)`, `deny(requestId)`, `onChanged`. |
 
 Preloads are `.cjs` because the app is ESM (`"type": "module"`) and Electron
 preload scripts must be CommonJS.
@@ -60,6 +66,24 @@ to the main process only through their preload bridge.
 | `history.{html,css,js}` | The **History** window: past requests (status, provenance, session, url, fields, time) with a *View screenshot* toggle. One list merged from this device's log **and** the service's — see [Request history — one list from two](#request-history--one-list-from-two). |
 | `image.{html,js}` | The **full-size screenshot viewer** (opened from the prompt or History; the window fits the image's natural size). |
 
+### Headless Keepers (rbkeeper-unlock-v1)
+
+Two more windows, built by vite from `ui/` like Settings:
+
+- **Headless Keepers…** (tray) — `ui/headless.html` + `ui/apps/HeadlessApp.jsx`: the
+  pinned headless Keepers, and **Add headless Keeper** (a name + the daemon's Ed25519
+  public key). The window shows the key's `rbk1-…` fingerprint, and *Add* stays disabled
+  until the owner confirms it matches the daemon's. Add registers the key with the service,
+  checks that the service's `headless_id` equals the local one, then pins it in the vault
+  blob (`headless_keepers`) and syncs.
+- **Headless Keeper restarted** — `ui/unlock.html` + `ui/apps/UnlockApp.jsx`: opened
+  (always on top) when a verified `unlock_request` arrives. It shows the pinned name, the
+  restart time and the comparison code, and offers **Deny** / **Approve**. Nothing is ever
+  approved without a click; the window closes on `unlock_resolved` or after about 5 minutes.
+
+The protocol, the pins and the failure behaviour are in
+[`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md).
+
 ### Windows & IPC
 
 The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
@@ -67,6 +91,26 @@ The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
 preload bridge (e.g. `keeper:request`, `history:data`, `image:data`) and back via
 IPC (`keeper:submit`, `history:screenshot`, `keeper:view-image`). The typed value
 travels renderer → main → WebSocket only; it is never written to disk or logged.
+
+**Every handler validates its sender** (`src/ipcsender.js`, issue #18). `ipcMain` has
+no notion of which window a channel belongs to, so a handler that answers whoever asked
+serves *every* renderer — and the ones that carry a secret (`pair:qr`, `fields:reveal`,
+`keeper:card-values`, `keeper:saved-values`, `cards:load`) or answer a pending request
+(`keeper:submit`) would serve it to whichever renderer asks first. So each handler names
+the window(s) it serves and starts with `fromWindow(event, channel, …wins)`, which
+requires all three of:
+
+1. the sender **is** one of those windows (identity, by `webContents.id`);
+2. the message came from that window's **top frame**, not an embedded one;
+3. that frame is still showing **our own document** — `rendererUrl(win.keeperPage)`, the
+   very URL `loadWindow` put there.
+
+The preload bridges are the first layer (a renderer can only call what its own preload
+exposes); this is the layer under it, for anything that gets past isolation. A refusal is
+logged (`[keeper] refused IPC "<channel>": <reason>`) and the handler returns its ordinary
+"nothing" — `null` / `[]` / `{ ok: false }` — never an error that would confirm the channel
+exists. `keeper:vault-status` (prompt + vaultpw) and `keeper:view-image` (prompt + history)
+are the only channels served for two windows.
 
 ### Declining with a reason
 
@@ -103,7 +147,9 @@ prod Keeper keep separate stores automatically:
 ~/.remote-browser-keeper/
 └── <base-url>/                         # e.g. rb.example.com, rb.dev.example.com
     ├── history.jsonl                   # value-free request log (newest appended)
-    ├── secrets.json                    # session-unlock secrets (by secret_id)
+    ├── secrets.enc.json                # session-unlock secrets (by secret_id), OS-encrypted
+    ├── secrets.json                    # plaintext provisioning inbox — absorbed into
+    │                                   # secrets.enc.json and removed on the next read
     │                                   # (no cards.json — saved cards live only in the synced vault)
     ├── device.json                     # this device's stable id (non-secret label)
     ├── device-token.json               # 🔒 this device's OWN service token, if enrolled
@@ -182,17 +228,18 @@ The API key stays in the main process: the History window is sandboxed under a
 The Keeper holds two kinds of sensitive data, both **per service base URL** (so dev
 and prod are isolated) under `~/.remote-browser-keeper/<base-url>/`:
 
-| | `secrets.json` | `cards.json` |
+| | `secrets.enc.json` | `cards.json` |
 |---|---|---|
 | **What** | session-encryption secrets, keyed by `secret_id` (`= sha256(secret)`) | saved payment cards for auto-fill |
 | **Used for** | answering the service's `secret_request` to unlock encrypted sessions (zero-knowledge) | unattended/assisted card `request_fill` |
-| **Written by** | external script `scripts/export_session_secret.py` (service repo) | the tray **Cards…** window (or hand-edit) |
-| **At rest** | **plaintext** file, `chmod 600` *(for now)* | **OS-encrypted** via `safeStorage` where a backend exists, else plaintext `chmod 600` |
+| **Written by** | the Keeper, absorbing the `secrets.json` inbox the external `scripts/export_session_secret.py` (service repo) writes | the tray **Cards…** window (or hand-edit) |
+| **At rest** | **OS-encrypted** via `safeStorage`, `chmod 600`; where no backend exists the plaintext inbox is kept instead (`chmod 600`) and that is logged | **OS-encrypted** via `safeStorage` where a backend exists, else plaintext `chmod 600` |
 | **Leaves the machine?** | only the secret value, over the authenticated Keeper WS, when the service asks for that `secret_id` | only field values, over the same WS, into the page; never logged |
 
-### `secrets.json` — session-unlock secrets
+### `secrets.enc.json` — session-unlock secrets
 
-`~/.remote-browser-keeper/<base-url>/secrets.json`, `chmod 600`. Shape:
+`~/.remote-browser-keeper/<base-url>/secrets.enc.json`, OS-encrypted, `chmod 600`. Shape
+(inside the envelope):
 `{ base_url, secrets: { <secret_id>: { secret, label, user_id, source } } }` where
 `secret_id = sha256(secret)`. When the service sends a `secret_request` for a
 `secret_id` (reopening an encrypted session without the API-key secret), the Keeper
@@ -200,10 +247,27 @@ looks it up here, verifies `sha256(secret) == secret_id`, and returns the secret
 over the WS. The service holds it **in memory only** for the session and never logs it.
 
 Provisioned by the service repo's `scripts/export_session_secret.py` (it extracts the
-secret from an API key and writes it here). Because that external writer can't use
-Electron `safeStorage`, `secrets.json` stays **plaintext at rest for now** — only the
-file permissions protect it. **Planned:** move provisioning into the Keeper so secrets
-get the same OS encryption as cards (service repo `docs/TODO.md`).
+secret from an API key and writes it out). Because that external writer can't use
+Electron `safeStorage`, it still writes plaintext — but to `secrets.json`, which is an
+**inbox, not the store**: the first Keeper read folds its entries into the encrypted
+`secrets.enc.json` and **removes it**, so no plaintext copy stands. The fold **merges**,
+so the external writer's fresh file can never drop a secret already held (dropping one
+would leave an encrypted session permanently unopenable). Nothing else changes for the
+script — keep writing `secrets.json` exactly as before.
+
+Where there is **no OS backend at all** (headless Linux, or running outside Electron)
+nothing is silently written in the clear: the inbox is left as the single copy, held to
+`chmod 600`, and the reason is logged once. Likewise a `secrets.enc.json` that exists but
+cannot be read (corrupt, or an envelope this machine holds no key for) is logged as such
+rather than read as "no secrets held" — see `readJsonState` in `src/securestore.js`.
+
+An unreadable store is also never **written over**. A reset login keyring (or a reset
+Windows profile, or a store copied from another machine) leaves the old envelope
+undecryptable while encryption itself still works — those bytes come back if the key
+does, so before absorbing an inbox on top of them the Keeper moves them aside to
+`secrets.enc.json.unreadable` (`-2`, `-3`… when one is already parked there) and logs
+where they went. To recover: restore the OS key they were encrypted with, then **merge**
+them back rather than renaming the file over the newer store.
 
 ### Saved cards for unattended auto-fill — stored **only in the synced vault**
 
@@ -248,9 +312,9 @@ zip, state, country } } } }`.
 > readable on disk. Only where there's **no backend** (e.g. headless Linux) does it
 > fall back to a `chmod 600` plaintext file. Reads handle both, so an existing plaintext
 > file **auto-migrates** to encrypted on the next save. If you'd still rather not keep
-> the CVV at rest, omit it and the Keeper prompts for it. (Secrets — `secrets.json` —
-> stay a filesystem vault for now; they're provisioned by an external script. See the
-> service repo `docs/TODO.md`.)
+> the CVV at rest, omit it and the Keeper prompts for it. (Session secrets get the same
+> OS encryption — `secrets.enc.json`; the plaintext `secrets.json` an external script
+> writes is absorbed into it and removed on the next read.)
 
 ### `device-token.json` — this device's own service token (issue #15)
 

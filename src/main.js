@@ -24,13 +24,28 @@ import { mergeHistory } from "./historymerge.js";
 import { fetchServerHistory, fetchServerScreenshot } from "./historyapi.js";
 import { normalizeDeclineReason } from "./declinereason.js";
 import { requestDeadline } from "./deadline.js";
+import { createOutbox } from "./outbox.js";
+import { rendererUrl, refuseSender } from "./ipcsender.js";
+import { isOneTimeCode, autofillValues, savableValues } from "./onetimecode.js";
+import {
+  UNLOCK_TIMEOUT_MS, parsePublicKey, isValidName, pinEntry, pinTombstone, mergeHeadlessPins, activePins,
+  verifyUnlockRequest, createReplayGuard, buildUnlockPayload, sealUnlock, registerHeadless, deleteHeadless,
+  SecretBoundToken, enrollHeadlessDevice, revokeDevice, revokeOlderHeadless, unlockLogLine,
+} from "./headless.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Renderer is built by Vite to ../renderer-dist (one HTML per window). With
 // KEEPER_DEV=1, load from the Vite dev server instead for hot-reload.
 const KEEPER_DEV = process.env.KEEPER_DEV === "1";
+const RENDERER_DIR = path.join(__dirname, "..", "renderer-dist");
+// The one definition of "our own document", used BOTH to load a window and to check that
+// a message really came from it (see ipcsender.js) — so the two cannot drift apart.
+function pageUrl(name) { return rendererUrl(name, { dev: KEEPER_DEV, rendererDir: RENDERER_DIR }); }
 function loadWindow(win, name) {
+  // Which page this window holds. The IPC guard reads it back off the window to know
+  // which document a message from it is supposed to be coming from.
+  win.keeperPage = name;
   // A window whose content fails to load still shows its frame, so the failure would
   // otherwise be a silent empty box. Name it in the log for EVERY window (the prompt
   // window additionally turns it into a user-visible failure — see failPrompt).
@@ -44,8 +59,34 @@ function loadWindow(win, name) {
   wc.on("render-process-gone", (_e, details) => {
     console.error(`[keeper] ${name} window renderer gone:`, (details && details.reason) || "?");
   });
-  if (KEEPER_DEV) win.loadURL(`http://localhost:5173/${name}.html`);
-  else win.loadFile(path.join(__dirname, "..", "renderer-dist", `${name}.html`));
+  win.loadURL(pageUrl(name));
+}
+
+// Every ipcMain handler below names the window(s) it serves and starts with this: the
+// message is answered only when it came from one of them, from that window's top frame,
+// with our own document still in it. See ipcsender.js for why — in short, `ipcMain` has no
+// idea which window a channel belongs to, so without this every handler serves every
+// renderer, and the ones that carry a secret (pair:qr, fields:reveal, keeper:card-values,
+// keeper:saved-values, cards:load) or answer a request (keeper:submit) serve it to
+// whichever renderer asks first.
+//
+// A refusal is a real event — the app itself never produces one — so it is logged rather
+// than swallowed. The handler then returns its ordinary "nothing" (null / [] / {ok:false}),
+// never an error that would tell a caller the channel exists.
+function fromWindow(e, channel, ...wins) {
+  let frameUrl = null;
+  let isMainFrame = false;
+  try {
+    const frame = e.senderFrame;                 // throws once the frame is disposed
+    isMainFrame = !!frame && frame === e.sender.mainFrame;
+    frameUrl = frame ? frame.url : null;
+  } catch { /* frame gone — leaves frameUrl null, which is refused below */ }
+  const allowed = wins
+    .filter((w) => w && !w.isDestroyed())
+    .map((w) => ({ id: w.webContents.id, url: pageUrl(w.keeperPage), page: w.keeperPage }));
+  const refusal = refuseSender({ senderId: e.sender.id, frameUrl, isMainFrame }, allowed);
+  if (refusal) console.error(`[keeper] refused IPC "${channel}": ${refusal}`);
+  return !refusal;
 }
 
 // ---------- Local request history (NEVER stores values) ----------
@@ -127,7 +168,10 @@ function recordHistory(req, outcome, reason) {
       url: req.url || null,
       requested_at: req._requested_at || null, // when the request arrived (ISO)
       resolved_at: now.toISOString(),
-      outcome, // "submitted" (user sent values) | "cancelled" | "autofilled" | "ui_failed" | "expired"
+      // "submitted" (user sent values) | "cancelled" | "autofilled" | "ui_failed" | "expired"
+      // | "undelivered" (answered here, but the link never came back — issue #19; written as
+      // a SECOND record for the request, which supersedes the first: see mergeHistory)
+      outcome,
       ...(reason ? { reason } : {}), // why it was declined, when the user said
       screenshot: hasShot ? "screenshots/" + req.request_id + ".jpg" : null,
       fields: (Array.isArray(req.fields) ? req.fields : []).map((f) => ({
@@ -182,6 +226,11 @@ const HEARTBEAT_MS = 25000; // how often we ping the service
 const DEAD_AFTER_MS = 70000; // no inbound frame this long => socket is dead
 const pending = new Map(); // request_id -> request payload (awaiting user)
 const queue = []; // request_ids waiting for the prompt window
+// Answers the socket could not take (issue #19). A fill/secret answer is never dropped on
+// the floor: it waits here for the reconnect, and if the request dies first that is
+// reported, not swallowed. In memory only — it holds the user's values. See outbox.js.
+const outbox = createOutbox({ send: safeSend });
+let lastUndelivered = null; // { requestId, why, at } — shown in the tray until dismissed
 
 // ---------- Keeper WebSocket ----------
 function connect() {
@@ -214,6 +263,9 @@ function connect() {
     updateTray();
     if (credentialKind === "device") refusedUpgrades = 0; // this token still works
     console.log("[keeper] connected" + (credentialKind === "device" ? " (device token)" : ""));
+    // Before anything else on this socket: an answer the user already gave while we were
+    // down is the one thing here that somebody is actively waiting for.
+    flushOutbox();
     // Pull any vault entries saved on another paired device (and push ours).
     void syncVaultNow();
     // Now that the link is proven, see whether this service can give this device a
@@ -229,11 +281,29 @@ function connect() {
     if (msg.type === "ping") { safeSend({ type: "pong" }); return; }
     if (msg.type === "pong") { return; } // heartbeat reply (already counted above)
     if (msg.type === "secret_request" && msg.request_id) { handleSecretRequest(msg); return; }
+    // A headless Keeper restarted and asks for the vault key (headless.js). Only ever
+    // shown for a pinned daemon with a valid signature; never answered without the user.
+    if (msg.type === "unlock_request" && msg.request_id) { void handleUnlockRequest(msg); return; }
+    if (msg.type === "unlock_resolved" && msg.request_id) {
+      if (pendingUnlocks.has(msg.request_id)) {
+        console.log(unlockLogLine("resolved-elsewhere", { request_id: msg.request_id, status: msg.status }));
+        finishUnlock(msg.request_id);
+      }
+      return;
+    }
     // Another keeper (or a timeout) already resolved this request server-side —
-    // dismiss our prompt for it so the user isn't asked twice.
-    if (msg.type === "request_resolved" && msg.request_id) { dismissRequest(msg.request_id); return; }
+    // dismiss our prompt for it so the user isn't asked twice. A queued answer for it is
+    // dropped rather than reported: nobody is waiting for it, and it holds values.
+    if (msg.type === "request_resolved" && msg.request_id) {
+      if (outbox.drop(msg.request_id)) console.log("[keeper] queued answer for", msg.request_id, "is moot — resolved elsewhere");
+      dismissRequest(msg.request_id);
+      return;
+    }
     if (msg.type === "fill_request" && msg.request_id) {
       if (pending.has(msg.request_id)) return; // dedup: server replays pending on reconnect
+      // We already answered this one while the link was down — the replay only proves the
+      // service is still waiting. Push the answer again instead of asking the user twice.
+      if (outbox.has(msg.request_id)) { flushOutbox(); return; }
       msg._requested_at = new Date().toISOString();
       msg._expires_at = requestDeadline(msg); // absolute, off the frame — null if not on the wire
       // A replay can carry a request the service has already given up on. Asking the user
@@ -419,8 +489,72 @@ function scheduleReconnect() {
   }, reconnectDelay);
 }
 
+// Fire-and-forget: fine for a ping/hello/device_state, where a frame lost to a closed
+// socket costs nothing (the next one carries the same truth). Returns whether the frame
+// actually went out — anything somebody is WAITING for must go through sendAnswer instead.
 function safeSend(obj) {
-  try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {}
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    console.warn("[keeper] send failed:", e.message);
+    return false;
+  }
+}
+
+// The single path for every fill_response/secret_response: the frames a request is blocked
+// on. If the socket cannot take it, it is queued and re-sent on reconnect (outbox.js), and
+// the user is told the answer is still in flight rather than being left to believe it landed.
+function sendAnswer(frame, { expiresAt = null, req = null } = {}) {
+  const { sent, evicted } = outbox.deliver(frame, { expiresAt, meta: req });
+  reportUndelivered(evicted);
+  if (!sent) {
+    console.warn("[keeper] link is down — answer for request", frame.request_id,
+      "is queued and will be sent on reconnect");
+    startOutboxTicker();
+    updateTray();
+  }
+  return sent;
+}
+
+// While anything is queued the outbox must be looked at on its own schedule, not only when
+// a socket opens. Two outages have no close/open event to hang off: a connect attempt that
+// HANGS (a black-holed network, rather than one that refuses), and an open socket whose
+// writes fail. In both, the only other tick — the reconnect backoff — has already run, and
+// an answer would sit there past its deadline with the user still believing it landed.
+const OUTBOX_TICK_MS = 5000;
+let outboxTimer = null;
+function startOutboxTicker() {
+  if (outboxTimer || !outbox.size()) return;
+  outboxTimer = setInterval(() => {
+    flushOutbox();
+    if (!outbox.size()) { clearInterval(outboxTimer); outboxTimer = null; }
+  }, OUTBOX_TICK_MS);
+}
+
+// Push whatever the last outage left queued, and name whatever can no longer be delivered.
+function flushOutbox() {
+  const { sent, evicted } = outbox.flush();
+  for (const e of sent) console.log("[keeper] delivered queued answer for request", e.requestId);
+  reportUndelivered(evicted);
+  if (sent.length) updateTray();
+}
+
+// An answer that never reached the service before its request stopped being answerable.
+// Same doctrine as failPrompt: a failure gets a name, in the log, in the tray and in
+// History (the later `undelivered` record supersedes the earlier `submitted` one — the log
+// is read newest-first and mergeHistory keeps the newest line per request_id). The one
+// thing this outcome must never be is invisible.
+function reportUndelivered(entries) {
+  for (const e of entries) {
+    const kind = e.frame && e.frame.type === "secret_response" ? "secret" : "fill";
+    console.error("[keeper] " + kind + " answer for request " + e.requestId + " was NEVER DELIVERED"
+      + " (" + e.why + ") — the connection did not come back before the request stopped being answerable");
+    lastUndelivered = { requestId: e.requestId, why: e.why, at: new Date().toISOString() };
+    if (e.meta) recordHistory(e.meta, "undelivered");
+  }
+  if (entries.length) updateTray();
 }
 
 // Service asked for a session-encryption secret by secret_id (zero-knowledge
@@ -437,10 +571,10 @@ function handleSecretRequest(msg) {
     console.warn("[keeper] secret store error:", e.message);
   }
   if (secret) {
-    safeSend({ type: "secret_response", request_id: msg.request_id, secret, grant: "once" });
+    sendAnswer({ type: "secret_response", request_id: msg.request_id, secret, grant: "once" });
     console.log("[keeper] secret_request", sidShort, "-> responded");
   } else {
-    safeSend({ type: "secret_response", request_id: msg.request_id, denied: true });
+    sendAnswer({ type: "secret_response", request_id: msg.request_id, denied: true });
     console.warn("[keeper] secret_request", sidShort, "-> not in vault, denied");
   }
 }
@@ -490,31 +624,55 @@ async function resolveVaultKey(cfg) {
 // Merge the decrypted remote vault blob with this device's local state: "vault"-scoped
 // saved fields AND saved cards (each merged per-entry, last-write-wins with tombstones).
 // Unknown collections are preserved so a newer client can add more without loss.
+// The pinned headless Keepers ({ <id>: { name, ed25519_pub, added_at, updated_at } }).
+// Held in memory only: the vault is where they live, and they are known only once a
+// vault sync has merged them in (pinsLoaded). Until then no unlock request is shown.
+let headlessPins = {};
+let pinsLoaded = false;
 function mergeVaultBlob(baseUrl, remoteBlob) {
   const fields = mergeRemoteVault(baseUrl, remoteBlob.fields || {});
   const c = mergeRemoteCards(baseUrl, remoteBlob.cards || {}, remoteBlob.cardsMeta || {});
-  return { ...remoteBlob, fields, cards: c.cards, cardsMeta: c.cardsMeta };
+  const out = { ...remoteBlob, fields, cards: c.cards, cardsMeta: c.cardsMeta };
+  // Headless Keeper pins (headless.js) live ONLY in the vault: the vault is the one place
+  // the service can neither read nor rewrite, which is what makes a pin trustworthy.
+  const pins = mergeHeadlessPins(remoteBlob.headless_keepers, headlessPins);
+  if (Object.keys(pins).length) out.headless_keepers = pins;
+  headlessPins = pins;
+  pinsLoaded = true;
+  return out;
 }
 
 // Sync the vault (fields + cards) with the service: pull the remote blob, merge it into
 // the local caches (last-write-wins), and push the union back. The service only ever sees
 // opaque ciphertext (see vault.js). Best-effort — quietly no-ops without an API key.
-let vaultSyncing = false;
-async function syncVaultNow() {
-  if (vaultSyncing) return;
+// Resolves to whether this pass synced. A call made while a sync is running does not
+// start a second one: it marks a re-run and shares the running one. So a change made
+// mid-sync (a new headless pin) is still pushed, and a caller that awaits gets a
+// sync that started after its change.
+let vaultSyncing = null;
+let vaultResync = false;
+function syncVaultNow() {
+  if (vaultSyncing) { vaultResync = true; return vaultSyncing; }
+  vaultSyncing = (async () => {
+    let ok = false;
+    do { vaultResync = false; ok = await syncVaultOnce(); } while (vaultResync);
+    return ok;
+  })().finally(() => { vaultSyncing = null; });
+  return vaultSyncing;
+}
+async function syncVaultOnce() {
   let cfg;
-  try { cfg = loadConfig(); } catch { return; }
+  try { cfg = loadConfig(); } catch { return false; }
   const conn = apiConn(cfg);
-  if (!conn.apiKey) return;
-  vaultSyncing = true;
+  if (!conn.apiKey) return false;
   try {
     const r = await resolveVaultKey(conn);
-    if (r.transient) return;
+    if (r.transient) return false;
     if (r.repair) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault: this device needs to re-pair to get the vault password");
       vaultNeedsRepair = true;
       updateTray();
-      return;
+      return false;
     }
     vaultNeedsRepair = false;
     await syncVault(
@@ -527,6 +685,7 @@ async function syncVaultNow() {
     // Cards now live only in the synced vault — once it has them, remove any legacy
     // on-disk cards.json so nothing card-related persists locally.
     dropLegacyCardsFile(cfg.baseUrl);
+    return true;
   } catch (e) {
     if (e instanceof VaultKeyMismatch) {
       if (!vaultNeedsRepair) console.warn("[keeper] vault:", e.message);
@@ -535,8 +694,8 @@ async function syncVaultNow() {
     } else {
       console.warn("[keeper] vault sync failed:", e.message);
     }
+    return false;
   } finally {
-    vaultSyncing = false;
     reportDeviceState(); // the sync just settled our vault state — publish it if it moved
   }
 }
@@ -593,7 +752,7 @@ function tryAutofillCard(req) {
   if (!card) return false; // not approved for this site → fall through to the prompt
   const values = buildCardValues(fields, card);
   if (!values) return false; // card can't fully satisfy it — let the user fill
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   recordHistory(req, "autofilled");
   console.log("[keeper] card autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
   return true;
@@ -708,8 +867,10 @@ function showNextPrompt() {
     }
     // If closed without an explicit submit/cancel, treat as cancel.
     if (pending.has(requestId)) {
-      recordHistory(pending.get(requestId), "cancelled");
-      safeSend({ type: "fill_response", request_id: requestId, cancelled: true });
+      const closed = pending.get(requestId);
+      recordHistory(closed, "cancelled");
+      sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true },
+        { expiresAt: closed._expires_at, req: closed });
       pending.delete(requestId);
     }
     if (queue[0] === requestId) queue.shift();
@@ -722,8 +883,8 @@ function showNextPrompt() {
 // is the window shown, so the user never sees an empty approval window, and the render
 // watchdog stands down.
 ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!promptState || !win || win !== promptWin || promptState.requestId !== request_id) return;
+  if (!fromWindow(e, "keeper:prompt-rendered", promptWin)) return;
+  if (!promptState || promptState.requestId !== request_id) return;
   if (promptState.rendered) return;
   promptState.rendered = true;
   clearTimeout(promptState.timer);
@@ -735,8 +896,8 @@ ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
 // Pull side of the delivery: the prompt renderer asks for the request it must draw, so
 // it does not depend on having been listening when main pushed it.
 ipcMain.handle("keeper:pending-request", (e) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!promptState || !win || win !== promptWin) return null;
+  if (!fromWindow(e, "keeper:pending-request", promptWin)) return null;
+  if (!promptState) return null;
   return promptState.payload;
 });
 
@@ -758,7 +919,8 @@ function failPrompt(requestId, reason) {
   const req = pending.get(requestId);
   if (req) {
     recordHistory(req, "ui_failed");
-    safeSend({ type: "fill_response", request_id: requestId, cancelled: true, error: "keeper_ui_failed", reason });
+    sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true, error: "keeper_ui_failed", reason },
+      { expiresAt: req._expires_at, req });
     pending.delete(requestId);
   }
   if (queue[0] === requestId) queue.shift();
@@ -794,8 +956,9 @@ function focusRequest(requestId) {
 function resolveRequest(requestId, payload) {
   if (!pending.has(requestId)) return;
   clearExpiry(requestId);
-  recordHistory(pending.get(requestId), payload.cancelled ? "cancelled" : "submitted", payload.reason);
-  safeSend({ type: "fill_response", request_id: requestId, ...payload });
+  const req = pending.get(requestId);
+  recordHistory(req, payload.cancelled ? "cancelled" : "submitted", payload.reason);
+  sendAnswer({ type: "fill_response", request_id: requestId, ...payload }, { expiresAt: req._expires_at, req });
   pending.delete(requestId);
   if (queue[0] === requestId) queue.shift();
   if (promptWin) { const w = promptWin; promptWin = null; w.close(); }
@@ -870,14 +1033,15 @@ function expireRequest(requestId) {
 // does not tick through suspend). Verified against main's own copy of the deadline, so the
 // renderer can never retire a request early.
 ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || win !== promptWin || !promptState || promptState.requestId !== request_id) return;
+  if (!fromWindow(e, "keeper:prompt-expired", promptWin)) return;
+  if (!promptState || promptState.requestId !== request_id) return;
   const req = pending.get(request_id);
   if (!req || req._expires_at == null || Date.now() < req._expires_at) return;
   expireRequest(request_id);
 });
 
-ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
+ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
+  if (!fromWindow(e, "keeper:submit", promptWin)) return;
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
 });
 // Decline. The optional `reason` is the user's short note about WHY (issue #11): it rides
@@ -886,6 +1050,7 @@ ipcMain.on("keeper:submit", (_e, { request_id, values }) => {
 // is the authority on what goes on the wire — and omitted entirely when there is none, so
 // a plain one-tap Cancel sends byte-for-byte what it always did.
 ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
+  if (!fromWindow(e, "keeper:cancel", promptWin)) return;
   // An expired request is already out of `pending`: there is nothing left to answer, but
   // the window must still close when the user dismisses it — resolveRequest would no-op
   // and leave a window nobody can get rid of. This does NOT swallow a decline reason: the
@@ -893,8 +1058,7 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
   // elsewhere), and resolveRequest's own `pending` check would have dropped it anyway. A
   // live request still falls through to the full reason path below.
   if (!pending.has(request_id)) {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (win && !win.isDestroyed()) win.close();
+    if (promptWin && !promptWin.isDestroyed()) promptWin.close(); // the guard above proved it is the sender
     return;
   }
   const note = normalizeDeclineReason(reason);
@@ -903,7 +1067,8 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
 // Prompt asks for a saved card's values mapped onto the pending request's fields
 // (when the user picks a card to pre-fill). Values stay local; the user reviews
 // and sends. Returns [{selector,value}].
-ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
+ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
+  if (!fromWindow(e, "keeper:card-values", promptWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -916,7 +1081,8 @@ ipcMain.handle("keeper:card-values", (_e, { request_id, card_id } = {}) => {
 });
 // "Auto-fill on this site next time": approve the request's domain for the chosen
 // card and persist it. Future requests from that domain fill silently.
-ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {}) => {
+ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) => {
+  if (!fromWindow(e, "keeper:remember-card-domain", promptWin)) return { ok: false };
   try {
     const req = pending.get(request_id);
     if (!req) return { ok: false };
@@ -926,20 +1092,21 @@ ipcMain.handle("keeper:remember-card-domain", (_e, { request_id, card_id } = {})
     const store = loadCards(base);
     if (approveDomain(store, card_id, host)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true, host };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
 // "Allow for all sites": approve the chosen card for every site (wildcard).
-ipcMain.handle("keeper:remember-card-all-sites", (_e, { card_id } = {}) => {
+ipcMain.handle("keeper:remember-card-all-sites", (e, { card_id } = {}) => {
+  if (!fromWindow(e, "keeper:remember-card-all-sites", promptWin)) return { ok: false };
   try {
     const base = cardBaseUrl();
     const store = loadCards(base);
     if (approveAllSites(store, card_id)) { saveCards(base, store); void syncVaultNow(); }
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
@@ -996,11 +1163,15 @@ async function sendHistory() {
   });
 }
 
-ipcMain.on("history:refresh", () => { void sendHistory(); });
+ipcMain.on("history:refresh", (e) => {
+  if (!fromWindow(e, "history:refresh", historyWin)) return;
+  void sendHistory();
+});
 // The proof image, from wherever it survives: this device's JPEG first (no network),
 // else the service's copy — a request answered on another device, or one whose local
 // file was evicted, still shows its screenshot. null = neither side has it.
-ipcMain.handle("history:screenshot", async (_e, id) => {
+ipcMain.handle("history:screenshot", async (e, id) => {
+  if (!fromWindow(e, "history:screenshot", historyWin)) return null;
   const sid = safeId(id);
   if (!sid) return null;
   try {
@@ -1063,29 +1234,33 @@ function openSavedFieldsWindow() {
   savedFieldsWin.once("ready-to-show", () => { savedFieldsWin.show(); savedFieldsWin.focus(); });
   savedFieldsWin.on("closed", () => { savedFieldsWin = null; });
 }
-ipcMain.handle("fields:list", () => {
+ipcMain.handle("fields:list", (e) => {
+  if (!fromWindow(e, "fields:list", savedFieldsWin)) return [];
   try { return listSaved(loadConfig().baseUrl); } catch { return []; }
 });
 // Reveal a single saved value on demand (e.g. to read a generated password you never
 // saw). The value stays local — returned only to this window's renderer, never the AI.
-ipcMain.handle("fields:reveal", (_e, { session, host, selector } = {}) => {
+ipcMain.handle("fields:reveal", (e, { session, host, selector } = {}) => {
+  if (!fromWindow(e, "fields:reveal", savedFieldsWin)) return { ok: false, value: null };
   try {
     const s = getSaved(loadConfig().baseUrl, session, host, selector);
     return { ok: true, value: s ? s.value : null };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("fields:forget", (_e, { session, host, selector } = {}) => {
+ipcMain.handle("fields:forget", (e, { session, host, selector } = {}) => {
+  if (!fromWindow(e, "fields:forget", savedFieldsWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const wasVault = getSaved(baseUrl, session, host, selector)?.scope === "vault";
     forgetField(baseUrl, session, host, selector);
     if (wasVault) void syncVaultNow(); // propagate the tombstone to other devices
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("fields:forget-all", () => {
+ipcMain.handle("fields:forget-all", (e) => {
+  if (!fromWindow(e, "fields:forget-all", savedFieldsWin)) return { ok: false };
   try { forgetAllFields(loadConfig().baseUrl); void syncVaultNow(); return { ok: true }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
 
 let pairWin = null;
@@ -1142,6 +1317,284 @@ function openVaultPwWindow() {
   vaultPwWin.on("closed", () => { vaultPwWin = null; });
 }
 
+// ---------- Headless Keepers (rbkeeper-unlock-v1 — headless.js, docs/rbkeeper-unlock-v1.md) ----------
+// A headless Keeper (a daemon on a server) holds no vault key at rest. On every boot it
+// asks this Keeper for one; the user approves it here, and the key travels sealed to that
+// boot's ephemeral key, so the service relaying it can't read it. Which daemons may ask
+// at all is decided by the pins in the vault, never by the service.
+
+// Requests verified and waiting for the user: request_id -> verified request + timer.
+const pendingUnlocks = new Map();
+const unlockReplay = createReplayGuard();
+
+async function handleUnlockRequest(msg) {
+  const requestId = String(msg.request_id).slice(0, 128);
+  if (pendingUnlocks.has(requestId)) return; // the service replays a pending request on reconnect
+  // Pins arrive with the first vault sync. Never judge a request against an empty set
+  // that only means "not synced yet".
+  if (!pinsLoaded) await syncVaultNow();
+  if (!pinsLoaded) {
+    console.warn(unlockLogLine("refused", { request_id: requestId, reason: "pins-unavailable" }));
+    return;
+  }
+  const v = verifyUnlockRequest(msg, headlessPins);
+  if (!v.ok) {
+    console.warn(unlockLogLine("refused", { request_id: requestId, headless_id: msg.headless_id, reason: v.reason }));
+    return;
+  }
+  if (pendingUnlocks.has(v.requestId)) return;
+  if (!unlockReplay.first("n:" + v.nonce, "r:" + v.requestId)) {
+    console.warn(unlockLogLine("refused", { request_id: v.requestId, headless_id: v.headlessId, reason: "replay" }));
+    return;
+  }
+  const now = Date.now();
+  const timer = setTimeout(() => {
+    console.log(unlockLogLine("expired", { request_id: v.requestId, name: v.name }));
+    finishUnlock(v.requestId);
+  }, UNLOCK_TIMEOUT_MS);
+  pendingUnlocks.set(v.requestId, { ...v, receivedAt: now, expiresAt: now + UNLOCK_TIMEOUT_MS, timer, busy: false });
+  console.log(unlockLogLine("received", { request_id: v.requestId, headless_id: v.headlessId, boot_id: v.bootId, name: v.name }));
+  updateTray();
+  openUnlockWindow();
+}
+
+// Drop a request (answered, resolved elsewhere, or expired) and move the window on.
+function finishUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return;
+  clearTimeout(u.timer);
+  pendingUnlocks.delete(requestId);
+  updateTray();
+  if (!unlockWin) return;
+  if (pendingUnlocks.size) unlockWin.webContents.send("unlock:changed");
+  else unlockWin.close();
+}
+
+// What the window shows: the oldest pending request. Identifiers, the pin's name and
+// the comparison code only — nothing secret is in a request.
+function currentUnlock() {
+  const u = pendingUnlocks.values().next().value;
+  if (!u) return null;
+  return {
+    request_id: u.requestId, name: u.name, headless_id: u.headlessId, boot_id: u.bootId,
+    restarted_at: u.ts * 1000, expires_at: u.expiresAt, code: u.code, waiting: pendingUnlocks.size,
+  };
+}
+
+// Approve (spec §5): revoke the daemon's earlier tokens, mint this boot's secret-less
+// device token, seal { vault key, token } to the boot's ephemeral key, and send only the
+// sealed box. Revoking FIRST matters: the service keeps at most 8 device records and
+// evicts the oldest, so enrolling first could push out the owner's phone (spec §7).
+async function approveUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return { ok: false, error: "This request is no longer pending." };
+  if (u.busy) return { ok: false, error: "Already working on it." };
+  u.busy = true;
+  let cfg = null;
+  let minted = null;
+  try {
+    cfg = loadConfig();
+    if (!cfg.apiKey) throw new Error("No API key configured.");
+    const vaultKey = loadVaultKey(cfg.baseUrl);
+    if (!vaultKey) throw new Error("This Keeper holds no vault key yet — sync or pair it first.");
+    if (!connected) throw new Error("Not connected to the service — try again once connected.");
+    const revoked = await revokeOlderHeadless(cfg, u.name);
+    minted = await enrollHeadlessDevice(cfg, { name: u.name, bootId: u.bootId, appVersion: app.getVersion() });
+    const payload = buildUnlockPayload({ vaultKey, deviceToken: minted.token });
+    const sealed = await sealUnlock({ ephPub: u.ephPub, headlessId: u.headlessId, bootId: u.bootId, requestId, payload });
+    if (!pendingUnlocks.has(requestId)) throw new Error("The request was resolved elsewhere meanwhile.");
+    if (!safeSend({ type: "unlock_response", request_id: requestId, enc: sealed.enc, ciphertext: sealed.ciphertext })) {
+      throw new Error("The connection dropped — nothing was sent. Try again.");
+    }
+    console.log(unlockLogLine("approved", { request_id: requestId, headless_id: u.headlessId, boot_id: u.bootId, name: u.name, revoked }));
+    finishUnlock(requestId);
+    return { ok: true };
+  } catch (e) {
+    // A token nobody received must not stay live.
+    if (minted) {
+      try { await revokeDevice(cfg, minted.deviceId); }
+      catch { console.warn(unlockLogLine("revoke-failed", { request_id: requestId, name: u.name })); }
+    }
+    u.busy = false;
+    const secretBound = e instanceof SecretBoundToken;
+    console.warn(unlockLogLine("approve-failed", { request_id: requestId, name: u.name, reason: secretBound ? "secret-bound-token" : "error" }));
+    return {
+      ok: false,
+      error: secretBound
+        ? "The service can't issue a secret-less device token yet, so nothing was sent."
+        : (e && e.message) || "Approve failed.",
+    };
+  }
+}
+
+function denyUnlock(requestId) {
+  const u = pendingUnlocks.get(requestId);
+  if (!u) return { ok: false, error: "This request is no longer pending." };
+  if (u.busy) return { ok: false, error: "Already approving it." };
+  // Unsent, the service times the request out the same way, so drop it either way.
+  const sent = safeSend({ type: "unlock_response", request_id: requestId, denied: true });
+  console.log(unlockLogLine("denied", { request_id: requestId, name: u.name, status: sent ? "sent" : "unsent" }));
+  finishUnlock(requestId);
+  return { ok: true };
+}
+
+let unlockWin = null;
+function openUnlockWindow() {
+  if (unlockWin) { unlockWin.webContents.send("unlock:changed"); unlockWin.show(); unlockWin.focus(); return; }
+  if (!pendingUnlocks.size) return;
+  unlockWin = new BrowserWindow({
+    show: false,
+    width: 440,
+    height: 400,
+    resizable: false,
+    fullscreenable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: "Remote Browser Keeper — Headless Keeper restarted",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "unlock-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  unlockWin.setAlwaysOnTop(true, "screen-saver");
+  unlockWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  unlockWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  unlockWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(unlockWin, "unlock");
+  unlockWin.once("ready-to-show", () => { unlockWin.show(); unlockWin.focus(); });
+  // Closing the window is not an answer: the request stays pending (tray) until it is
+  // approved, denied, resolved elsewhere or expires.
+  unlockWin.on("closed", () => { unlockWin = null; });
+}
+
+ipcMain.handle("unlock:get", (e) => {
+  if (!fromWindow(e, "unlock:get", unlockWin)) return null;
+  return currentUnlock();
+});
+// Both answers name the request the user was looking at, so a request that arrived
+// meanwhile can't be approved in its place.
+ipcMain.handle("unlock:approve", async (e, { requestId } = {}) => {
+  if (!fromWindow(e, "unlock:approve", unlockWin)) return { ok: false };
+  return approveUnlock(String(requestId || ""));
+});
+ipcMain.handle("unlock:deny", (e, { requestId } = {}) => {
+  if (!fromWindow(e, "unlock:deny", unlockWin)) return { ok: false };
+  return denyUnlock(String(requestId || ""));
+});
+
+// Pinning: the owner pastes the public key the daemon printed and names it. The pin goes
+// into the vault (synced to every paired device), then the daemon is registered with the
+// service so its connection is accepted.
+let headlessWin = null;
+function openHeadlessWindow() {
+  if (headlessWin) { headlessWin.show(); headlessWin.focus(); return; }
+  headlessWin = new BrowserWindow({
+    width: 480,
+    height: 560,
+    resizable: true,
+    fullscreenable: false,
+    title: "Remote Browser Keeper — Headless Keepers",
+    backgroundColor: "#070A12",
+    webPreferences: {
+      preload: path.join(__dirname, "headless-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  headlessWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  headlessWin.webContents.on("will-navigate", (e) => e.preventDefault());
+  headlessWin.webContents.on("will-redirect", (e) => e.preventDefault());
+  loadWindow(headlessWin, "headless");
+  headlessWin.once("ready-to-show", () => { headlessWin.show(); headlessWin.focus(); });
+  headlessWin.on("closed", () => { headlessWin = null; });
+}
+
+// The pins are only known after a vault sync; changing them before would be blind.
+async function ensurePinsLoaded() {
+  if (!pinsLoaded) await syncVaultNow();
+  return pinsLoaded;
+}
+
+ipcMain.handle("headless:list", async (e) => {
+  if (!fromWindow(e, "headless:list", headlessWin)) return { ok: false };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
+  const keepers = Object.entries(activePins(headlessPins))
+    .map(([id, p]) => {
+      const key = parsePublicKey(p.ed25519_pub);
+      return { id, name: p.name, fingerprint: key ? key.fingerprint : null, added_at: p.added_at || null };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { ok: true, keepers };
+});
+
+// The fingerprint of a pasted key, for the owner to compare with `rb-keeperd enroll`
+// before adding it (spec §3 step 2). Public data only.
+ipcMain.handle("headless:preview", async (e, { publicKey } = {}) => {
+  if (!fromWindow(e, "headless:preview", headlessWin)) return { ok: false };
+  const key = parsePublicKey(publicKey);
+  if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
+});
+
+// Spec §3 steps 3–4: register with the service (which computes the id itself; it must
+// match ours), then pin the key in the vault and sync. The renderer only calls this after
+// the owner confirmed the fingerprint.
+ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
+  if (!fromWindow(e, "headless:add", headlessWin)) return { ok: false };
+  const nm = String(name || "").trim();
+  if (!isValidName(nm)) return { ok: false, error: "Name: 1–32 letters, digits, '.', '_' or '-'." };
+  const key = parsePublicKey(publicKey);
+  if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
+  const active = activePins(headlessPins);
+  const same = active[key.id];
+  if (same && same.name !== nm) return { ok: false, error: `This key is already pinned as "${same.name}". Remove it first.` };
+  // Approving revokes every older token of the same name, so two daemons sharing a
+  // name would keep revoking each other.
+  if (!same && Object.values(active).some((p) => p.name === nm)) return { ok: false, error: `"${nm}" is already in use — pick another name or remove that one.` };
+  let cfg;
+  try { cfg = loadConfig(); } catch (err) { return { ok: false, error: err.message }; }
+  try {
+    await registerHeadless(cfg, { name: nm, pub: key.pub });
+  } catch (err) {
+    return { ok: false, error: `Not added: ${err.message}.` };
+  }
+  console.log(unlockLogLine("registered", { headless_id: key.id, name: nm }));
+  if (!same) {
+    const { id, entry } = pinEntry({ name: nm, pub: key.pub });
+    headlessPins = { ...headlessPins, [id]: entry };
+    console.log(unlockLogLine("pinned", { headless_id: id, name: nm }));
+  }
+  if (!(await syncVaultNow())) {
+    return { ok: false, id: key.id, fingerprint: key.fingerprint, error: "Registered and pinned here, but the vault sync failed, so other devices don't have it yet. It is retried with the next sync; Add again to retry now." };
+  }
+  return { ok: true, id: key.id, fingerprint: key.fingerprint };
+});
+
+ipcMain.handle("headless:remove", async (e, { id } = {}) => {
+  if (!fromWindow(e, "headless:remove", headlessWin)) return { ok: false };
+  if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet." };
+  const hid = String(id || "");
+  if (!activePins(headlessPins)[hid]) return { ok: false, error: "Not pinned." };
+  headlessPins = { ...headlessPins, [hid]: pinTombstone() };
+  console.log(unlockLogLine("unpinned", { headless_id: hid }));
+  const synced = await syncVaultNow();
+  let cfg;
+  try { cfg = loadConfig(); await deleteHeadless(cfg, hid); }
+  catch (err) { return { ok: false, error: `Unpinned${synced ? "" : " here (vault sync pending)"}, but ${err.message}.` }; }
+  return synced ? { ok: true } : { ok: false, error: "Unpinned here and at the service, but the vault sync failed; it is retried with the next sync." };
+});
+
 let settingsWin = null;
 function openSettingsWindow() {
   if (settingsWin) { settingsWin.show(); settingsWin.focus(); return; }
@@ -1169,17 +1622,22 @@ function openSettingsWindow() {
   settingsWin.on("closed", () => { settingsWin = null; });
 }
 // Per-device Keeper preferences (see settings.js). Non-secret; local-only.
-ipcMain.handle("keeper:get-settings", () => {
+ipcMain.handle("keeper:get-settings", (e) => {
+  if (!fromWindow(e, "keeper:get-settings", settingsWin)) return { ok: false };
   try { return { ok: true, settings: loadSettings(loadConfig().baseUrl) }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("keeper:set-settings", (_e, patch = {}) => {
+ipcMain.handle("keeper:set-settings", (e, patch = {}) => {
+  if (!fromWindow(e, "keeper:set-settings", settingsWin)) return { ok: false };
   try { return { ok: true, settings: saveSettings(loadConfig().baseUrl, patch) }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  catch (err) { return { ok: false, error: err.message }; }
 });
 // Encode the connection config into a QR image. The token lives only inside the
 // returned image — it is never sent to the renderer as text.
-ipcMain.handle("pair:qr", async () => {
+ipcMain.handle("pair:qr", async (e) => {
+  // The single highest-value channel in the app: the image it returns carries the API key,
+  // the session secret AND the vault password. Only the Pair window may ever ask.
+  if (!fromWindow(e, "pair:qr", pairWin)) return { error: "Not available." };
   try {
     const { baseUrl, apiKey } = loadConfig();
     if (!apiKey) return { error: "No API key configured for this Keeper." };
@@ -1195,25 +1653,29 @@ ipcMain.handle("pair:qr", async () => {
     let host = baseUrl;
     try { host = new URL(baseUrl).host; } catch { /* keep raw */ }
     return { dataUrl, host };
-  } catch (e) {
-    return { error: e.message };
+  } catch (err) {
+    return { error: err.message };
   }
 });
 
 // Vault key status for the UI: whether a key is held, whether it's a custom (user)
 // password, and whether this device is out of sync (needs re-pair).
-ipcMain.handle("keeper:vault-status", () => {
+ipcMain.handle("keeper:vault-status", (e) => {
+  // Two windows ask this one: the prompt (to default a generated password to the vault)
+  // and the vault-password window.
+  if (!fromWindow(e, "keeper:vault-status", promptWin, vaultPwWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const k = loadVaultKey(baseUrl);
     return { ok: true, hasKey: !!k, custom: !!(k && k.format === "aesgcm-pbkdf2-v2"), needsRepair: vaultNeedsRepair };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // The same identity + vault state we report to the service, for the Settings window — so
 // "what is this device on?" is answerable without asking the service. Inert metadata: no
 // password, no key, and (per vaultKeyReport) no secret_id for a legacy v1 key.
-ipcMain.handle("keeper:device-info", () => {
+ipcMain.handle("keeper:device-info", (e) => {
+  if (!fromWindow(e, "keeper:device-info", settingsWin)) return { ok: false };
   try {
     const report = deviceReport();
     if (!report.device) return { ok: false, error: "device report unavailable" };
@@ -1232,13 +1694,14 @@ ipcMain.handle("keeper:device-info", () => {
         enrollment_supported: enrollState.supported,
       },
     };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // Item 3: set a user-chosen vault password. Reads the current vault under the current
 // key, re-encrypts it under the new password (pbkdf2), and re-uploads — so no data is
 // lost. Other paired devices then see a secret_id mismatch and must re-pair to resync.
-ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
+ipcMain.handle("keeper:set-vault-password", async (e, { password } = {}) => {
+  if (!fromWindow(e, "keeper:set-vault-password", vaultPwWin)) return { ok: false };
   try {
     const cfg = loadConfig();
     const conn = apiConn(cfg);
@@ -1249,9 +1712,9 @@ ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
     const oldKey = loadVaultKey(cfg.baseUrl) || ensureVaultKey(cfg.baseUrl);
     let current;
     try { current = await pullVault(conn, oldKey); }
-    catch (e) {
-      if (e instanceof VaultKeyMismatch) return { ok: false, error: "This device is out of sync — re-pair it first." };
-      return { ok: false, error: e.message };
+    catch (err) {
+      if (err instanceof VaultKeyMismatch) return { ok: false, error: "This device is out of sync — re-pair it first." };
+      return { ok: false, error: err.message };
     }
     const newKey = userVaultKey(pw);
     const put = await putVault(conn, newKey, current.data || emptyVault(), current.version);
@@ -1261,18 +1724,26 @@ ipcMain.handle("keeper:set-vault-password", async (_e, { password } = {}) => {
     reportDeviceState(); // new key format + new vault id — tell the service which vault we're on now
     console.log("[keeper] vault re-keyed to a custom password (pbkdf2-v2); other devices must re-pair");
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle("cards:load", () => loadCards(cardBaseUrl()));
-ipcMain.handle("cards:storage-info", () => ({ encrypted: secureStorageAvailable(), platform: process.platform }));
-ipcMain.handle("cards:save", (_e, store) => {
+// Card numbers and CVVs — the Cards window and nothing else.
+ipcMain.handle("cards:load", (e) => {
+  if (!fromWindow(e, "cards:load", cardsWin)) return {}; // an empty store is `{}` — see cards.js `_store`
+  return loadCards(cardBaseUrl());
+});
+ipcMain.handle("cards:storage-info", (e) => {
+  if (!fromWindow(e, "cards:storage-info", cardsWin)) return { encrypted: false, platform: process.platform };
+  return { encrypted: secureStorageAvailable(), platform: process.platform };
+});
+ipcMain.handle("cards:save", (e, store) => {
+  if (!fromWindow(e, "cards:save", cardsWin)) return { ok: false };
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");
     saveCards(cardBaseUrl(), store);
     void syncVaultNow(); // propagate the card add/edit/delete to other devices
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
 
@@ -1315,15 +1786,13 @@ function openImageWindow(dataUrl) {
 // The prompt renderer reports its content height; fit the window to it (keep the
 // width, cap to the screen) so there's no empty space or clipped content.
 ipcMain.on("keeper:resize", (e, height) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || win !== promptWin || !Number.isFinite(height) || height < 1) return;
+  if (!fromWindow(e, "keeper:resize", promptWin)) return;
+  if (!Number.isFinite(height) || height < 1) return;
   const area = screen.getPrimaryDisplay().workAreaSize;
-  const [w] = win.getContentSize();
+  const [w] = promptWin.getContentSize();
   const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
-  win.setContentSize(w, ch);
+  promptWin.setContentSize(w, ch);
 });
-// Silent fill when EVERY field of the request has a saved value marked "don't ask
-// again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
 // Unattended password generation: when EVERY field of a request is a `generate` field,
 // the Keeper creates each value itself (genpassword.js policy), fills them, and saves them
 // — no prompt. The generated password is never shown to the user, so it's saved to the
@@ -1350,9 +1819,10 @@ function tryAutofillGenerate(req) {
   for (const f of fields) {
     const value = shared.get(f.selector);
     values.push({ selector: f.selector, value });
-    if (host) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true); // auto-fill next time
+    // auto-fill next time — but never a one-time code (onetimecode.js)
+    if (host && !isOneTimeCode(f)) saveValue(baseUrl, req.session_id, host, f.selector, value, scope, true);
   }
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   if (scope === "vault" && host) void syncVaultNow();
   recordHistory(req, "autofilled");
   logGenerated(req, fields, shared, host, scope);
@@ -1384,19 +1854,19 @@ function logGenerated(req, fields, shared, host, scope) {
   }
 }
 
+// Silent fill when EVERY field of the request has a saved value marked "don't ask
+// again" (auto). Otherwise return false → the prompt shows (prefilling what's saved).
+// A one-time code (field kind "code") always prompts, even if an earlier build saved one
+// under that selector: replaying a dead code silently pushes the login toward lockout.
 function tryAutofillFields(req) {
   const fields = Array.isArray(req.fields) ? req.fields : [];
   if (!fields.length) return false;
   let baseUrl;
   try { baseUrl = loadConfig().baseUrl; } catch { return false; }
   const host = hostFromUrl(req.url || "");
-  const values = [];
-  for (const f of fields) {
-    const s = getSaved(baseUrl, req.session_id, host, f.selector);
-    if (!s || !s.auto || s.value == null) return false; // not all auto-fillable → prompt
-    values.push({ selector: f.selector, value: s.value });
-  }
-  safeSend({ type: "fill_response", request_id: req.request_id, values });
+  const values = autofillValues(fields, (selector) => getSaved(baseUrl, req.session_id, host, selector));
+  if (!values) return false;
+  sendAnswer({ type: "fill_response", request_id: req.request_id, values }, { expiresAt: req._expires_at, req });
   recordHistory(req, "autofilled");
   console.log("[keeper] field autofill (" + host + ") ->", fields.length, "field(s) for session", req.session_id || "?");
   return true;
@@ -1404,7 +1874,9 @@ function tryAutofillFields(req) {
 
 // Saved field values: return any previously-saved values for this request's
 // fields (so the prompt prefills them), and save the submitted values per scope.
-ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
+// One-time codes are neither prefilled nor saved (onetimecode.js).
+ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
+  if (!fromWindow(e, "keeper:saved-values", promptWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1412,6 +1884,7 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     const host = hostFromUrl(req.url || "");
     const out = [];
     for (const f of (req.fields || [])) {
+      if (isOneTimeCode(f)) continue; // never prefill a stored (dead) one-time code
       const s = getSaved(baseUrl, req.session_id, host, f.selector);
       if (s) out.push({ selector: f.selector, value: s.value, scope: s.scope, auto: s.auto });
     }
@@ -1420,7 +1893,8 @@ ipcMain.handle("keeper:saved-values", (_e, { request_id } = {}) => {
     return [];
   }
 });
-ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = {}) => {
+ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {}) => {
+  if (!fromWindow(e, "keeper:save-fields", promptWin)) return { ok: false };
   try {
     if (!Array.isArray(values) || !["session", "forever", "vault", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
@@ -1428,7 +1902,9 @@ ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = 
     const { baseUrl } = loadConfig();
     const host = hostFromUrl(req.url || "");
     let touchedVault = scope === "vault";
-    for (const v of values) {
+    // Forgetting is always allowed (it clears a code an earlier build saved); a save
+    // drops every code field, judged by the pending request's kinds, not the renderer's.
+    for (const v of (scope === "forget" ? values : savableValues(req.fields, values))) {
       if (!v || !v.selector) continue;
       if (scope === "forget") {
         // A forget may tombstone a vault entry, so it too needs a push.
@@ -1440,21 +1916,25 @@ ipcMain.handle("keeper:save-fields", (_e, { request_id, values, scope, auto } = 
     }
     if (touchedVault) void syncVaultNow(); // push the new/removed vault entry to other devices
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
-ipcMain.on("keeper:view-image", (_e, dataUrl) => openImageWindow(dataUrl));
+// Both the prompt and History offer "tap the proof image to enlarge".
+ipcMain.on("keeper:view-image", (e, dataUrl) => {
+  if (!fromWindow(e, "keeper:view-image", promptWin, historyWin)) return;
+  openImageWindow(dataUrl);
+});
 // The viewer reports the image's natural size; fit the window to it (capped to
 // the screen work area) so the user sees it at normal size.
 ipcMain.on("image:sized", (e, w, h) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  if (!win || !Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
+  if (!fromWindow(e, "image:sized", imageWin)) return;
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
   const area = screen.getPrimaryDisplay().workAreaSize;
   const cw = Math.max(320, Math.min(Math.round(w) + 32, area.width - 80));
   const ch = Math.max(240, Math.min(Math.round(h) + 32, area.height - 120));
-  win.setContentSize(cw, ch);
-  win.center();
+  imageWin.setContentSize(cw, ch);
+  imageWin.center();
 });
 
 // ---------- Tray ----------
@@ -1483,7 +1963,7 @@ function updateTray() {
   tray.setToolTip(`Remote Browser Keeper — ${state} · ${host}`);
   // A render failure is announced in the menu bar itself, since the surface that would
   // normally tell the user (the prompt window) is the thing that just failed.
-  if (process.platform === "darwin") tray.setTitle(lastPromptFailure ? "⚠︎" : trayFallbackTitle);
+  if (process.platform === "darwin") tray.setTitle(lastPromptFailure || lastUndelivered ? "⚠︎" : trayFallbackTitle);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `Service: ${host}`, enabled: false },
     // Use colored emoji dots: a plain "●" inherits the (gray) disabled-item text
@@ -1494,13 +1974,28 @@ function updateTray() {
       label: `⚠︎ Approval window failed to render (${lastPromptFailure.reason}) — click to dismiss`,
       click: () => { lastPromptFailure = null; updateTray(); },
     }, { type: "separator" }] : []),
+    // An answer already given but not yet on the wire: the user closed the prompt believing
+    // they were done, so the menu bar is where that belief gets corrected (issue #19).
+    ...(outbox.size() ? [{
+      label: `⏳ ${outbox.size()} answer(s) waiting for the connection`,
+      enabled: false,
+    }, { type: "separator" }] : []),
+    ...(lastUndelivered ? [{
+      label: `⚠︎ An answer never reached the service (${lastUndelivered.why}) — click to dismiss`,
+      click: () => { lastUndelivered = null; updateTray(); },
+    }, { type: "separator" }] : []),
     ...pendingMenuItems(),
+    ...(pendingUnlocks.size ? [{
+      label: `🔓 Headless Keeper waiting for approval (${pendingUnlocks.size})…`,
+      click: openUnlockWindow,
+    }, { type: "separator" }] : []),
     { label: "Cards…", click: openCardsWindow },
     { label: "Saved fields…", click: openSavedFieldsWindow },
     { label: "History…", click: openHistoryWindow },
     { type: "separator" },
     { label: "Pair phone…", click: openPairWindow },
     { label: "Set vault password…", click: openVaultPwWindow },
+    { label: "Headless Keepers…", click: openHeadlessWindow },
     { label: "Settings…", click: openSettingsWindow },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     // A device left on the v1 key model is a real exposure (v1's stored id IS the key),
