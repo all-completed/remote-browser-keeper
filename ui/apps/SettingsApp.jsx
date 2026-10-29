@@ -11,6 +11,20 @@ const VAULT_STATE = {
 };
 const TONE = { ok: "var(--ok, #57d38c)", bad: "var(--danger, #ef6b6b)", muted: "var(--muted2)" };
 
+// Which credential the live socket is using, said plainly. The distinction that matters
+// to the user is "only this device can be cut off" vs "cutting this off cuts off
+// everything", so lead with that rather than with the token.
+function authLabel(auth) {
+  if (!auth) return "account key (shared with every device)";
+  if (auth.kind === "device" || auth.enrolled) {
+    return "this device's own token" + (auth.secret_bound ? "" : " (no encryption secret)");
+  }
+  if (auth.enrollment_supported === false) {
+    return "account key — this service doesn't issue per-device tokens";
+  }
+  return "account key (shared with every device)";
+}
+
 // One label/value line of the device panel.
 function Row({ label, children, mono }) {
   return (
@@ -84,6 +98,10 @@ export default function SettingsApp() {
             <>
               <Row label="Device">{info.device.name} · {info.device.platform} · v{info.device.app_version}</Row>
               <Row label="Device ID" mono>{info.device.id}</Row>
+              {/* How this device authenticates (issue #15). "Account key" is not a fault
+                  — it is how every Keeper worked before per-device tokens, and how this
+                  one keeps working against a service that doesn't offer them. */}
+              <Row label="Auth">{authLabel(info.auth)}</Row>
               <Row label="Vault">
                 {info.vault.has_key
                   ? <>schema {info.vault.schema} · {info.vault.key_format}{info.vault.version != null ? ` · version ${info.vault.version}` : " · not synced yet"}</>
