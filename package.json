@@ -1,6 +1,6 @@
 {
   "name": "remote-browser-keeper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tray app that supplies passwords/logins to remote browser sessions without exposing them to the AI model.",
   "author": "all-completed",
   "license": "MIT",
