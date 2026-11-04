@@ -48,7 +48,7 @@ remote-browser-keeper/
 | `onetimecode.js` | **One-time codes (field kind `code`) are never saved and never replayed** (issue #24): `isOneTimeCode`, `autofillValues` (the silent-fill decision — any code field sends the request to the prompt, even if an earlier build stored one) and `savableValues` (what `keeper:save-fields` may store — never a code, judged by the pending request's kinds). Pure; shared by the main process and the prompt, which hides the save control for a codes-only request. |
 | `ipcsender.js` | **Who may send a given IPC message.** `rendererUrl(page, …)` is the single definition of "one of our own documents" — used both to load a window and to check that a message really came from it; `refuseSender(sender, allowed)` is the decision. Pure; see [Windows & IPC](#windows--ipc). |
 | `headless.js` | **Headless Keepers** (rbkeeper-unlock-v1, issue #26): the `hk1_` id and `rbk1-` fingerprint of a daemon key, vault pins (`headless_keepers`), Ed25519 verification of an `unlock_request`, the replay guard, the comparison code, the HPKE seal of the unlock payload, and the service calls (register / delete a headless Keeper, revoke older boot tokens, enroll the new one with `secret_bound: false`). Pure apart from the injected `fetch`; see [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md). |
-| `windowstate.js` | The window's remembered size, position and maximized state (`window.json` in Electron's userData), and the fallback to a centred default when the monitor it was on is gone. Ported from Getway Chat desktop. Pure. |
+| `windowstate.js` | The window's remembered size, position and maximized state (`window.json` in Electron's userData), and the fallback to a centred default when the monitor it was on is gone. Ported from Getway Chat desktop. Pure. Opens **maximized** unless the saved state says `maximized: false` (issue #31) — so a first launch fills the screen; `main.js` applies it when the window is first shown, since Electron's `maximize()` would show a hidden window. |
 | `preload.cjs` | The **one** `contextBridge` preload for the one window (issue #28): `keeperApp` (page navigation + status), `keeper` (fill requests), `keeperUnlock`, `keeperHistory`, `keeperCards`, `savedFields`, `keeperPair`, `keeperVault`, `keeperHeadless`, `keeperSettings` — the same bridge names the separate windows' preloads used. |
 
 Preloads are `.cjs` because the app is ESM (`"type": "module"`) and Electron
@@ -71,10 +71,19 @@ the sidebar moves between them in place.
 | `pages/HistoryPage.jsx` | the **History** window — one list from this device's log **and** the service's ([details](#request-history--one-list-from-two)). |
 | `pages/CardsPage.jsx`, `SavedFieldsPage.jsx`, `HeadlessPage.jsx`, `PairPage.jsx`, `VaultPasswordPage.jsx`, `SettingsPage.jsx` | the windows of the same names. |
 | `components/ImageViewer.jsx` | the **full-size screenshot** window — now an in-app full-size modal. |
+| `components/ListFilters.jsx`, `lib/search.js` | the **search box and filter pickers** of every long list (History, Saved fields, Cards, Headless Keepers — issue #31): `PageHeader`'s filter row, filtering client-side what the page already holds (every word of the query must appear; pinned by `test/search.test.mjs`). |
 
 `ui/brand.js` is the brand the shell wears: the name, the app icon and the service colour
 (the accent and rsuite's primary palette). Both are the icons registry's
 (vasyaod/icons#11): the flat browser-window-and-key icon and emerald `#2BA673`.
+
+Layout (issue #31, `styles/app.css`): the sidebar's brand block and the title bar are one
+56 px band with one divider under it; each page is a `.page-wrap` column that fills the
+content area up to 1680 px (a maximized 1920 px screen) and is centred beyond it. Lists are
+ui-components `ResponsiveTable`s (stacked cards on a phone), forms and details are bordered
+cards in `.card-grid` / `.split` grids that follow the column's width (container queries),
+and a single request or form (Approvals, Pair phone, Vault password) is a centred 880 px
+column.
 
 ### Headless Keepers (rbkeeper-unlock-v1)
 

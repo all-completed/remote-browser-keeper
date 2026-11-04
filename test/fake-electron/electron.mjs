@@ -59,11 +59,14 @@ export class BrowserWindow extends EventEmitter {
   hide() { this.visible = false; }
   focus() {}
   restore() { this.minimized = false; }
-  maximize() {}
+  // As Electron's: "This will also show (but not focus) the window if it isn't being
+  // displayed already" — so a window maximized at creation would be on screen before it
+  // painted (issue #31).
+  maximize() { this.maximized = true; this.visible = true; this.minimized = false; }
   center() {}
   isVisible() { return this.visible; }
   isMinimized() { return this.minimized; }
-  isMaximized() { return false; }
+  isMaximized() { return !!this.maximized; }
   isDestroyed() { return this.destroyed; }
   setAlwaysOnTop(flag, level) { this.alwaysOnTop = flag ? (level || true) : false; }
   setContentProtection(v) { this.contentProtection = v; }

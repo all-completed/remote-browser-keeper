@@ -773,6 +773,7 @@ let mainLoaded = false;        // the current document finished loading (did-fin
 let mainPainted = false;       // ...and painted once (ready-to-show)
 let showWhenPainted = false;   // the user asked for the window before it had painted
 let currentPage = "approvals"; // what the window shows (kept across a renderer reload)
+let maximizeOnShow = false;    // open maximized on the first present (restoreBounds; issue #31)
 // The window was brought up FROM HIDDEN by a request: once nothing is waiting any more it
 // goes away again, the way the old prompt window closed itself after an answer. Cleared as
 // soon as the user opens the window or moves around in it — then it is theirs.
@@ -813,7 +814,10 @@ function createMainWindow() {
       spellcheck: false,
     },
   });
-  if (bounds.maximized) win.maximize();
+  // Maximized (the default since issue #31) is applied when the window is first presented,
+  // not here: Electron's maximize() also SHOWS a hidden window, which would put it on screen
+  // before it painted and before a request it was built for is rendered (issue #3).
+  maximizeOnShow = !!bounds.maximized;
   mainWin = win;
   mainLoaded = false;
   mainPainted = false;
@@ -862,8 +866,9 @@ function createMainWindow() {
   });
   let saveTimer = null;
   const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveWindowState(win), 500); };
-  win.on("resize", saveSoon);
-  win.on("move", saveSoon);
+  // maximize/unmaximize too, as Getway Chat does: the flag is what the next launch opens with
+  // (issue #31), and a platform that maximizes without a resize event must not lose it.
+  for (const ev of ["resize", "move", "maximize", "unmaximize"]) win.on(ev, saveSoon);
   // Closing hides. It never quits (Quit is in the tray), and it is not a way to lose the
   // window's state: the next open shows the same page.
   win.on("close", (e) => {
@@ -894,6 +899,7 @@ function createMainWindow() {
 function presentWindow(win) {
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
+  if (maximizeOnShow && win === mainWin) { maximizeOnShow = false; win.maximize(); }
   win.show();
   win.focus();
   // A normal app while its window is open: a dock icon (macOS) to switch back to it.

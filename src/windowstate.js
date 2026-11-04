@@ -16,12 +16,17 @@ const num = (v) => (Number.isFinite(v) ? Math.round(v) : null);
  * The bounds to open the window with: the saved ones if they are sane and at least 100x50 px of
  * the window's top lands on a display that is connected now (a monitor unplugged since would
  * otherwise open the window off screen); else the default size, centred by Electron.
+ *
+ * Maximized unless the saved state says otherwise (issue #31): a first launch — nothing saved,
+ * or a window.json from before the flag existed — opens filling the screen, and the default size
+ * is only what "un-maximize" goes back to. Once the user un-maximizes, `maximized: false` is
+ * saved and respected from then on.
  */
 export function restore(saved, displays) {
   const s = saved && typeof saved === 'object' ? saved : {};
   const width = Math.max(MIN.width, num(s.width) ?? DEFAULT.width);
   const height = Math.max(MIN.height, num(s.height) ?? DEFAULT.height);
-  const out = { width, height, maximized: s.maximized === true };
+  const out = { width, height, maximized: s.maximized !== false };
   const x = num(s.x);
   const y = num(s.y);
   if (x == null || y == null) return out;

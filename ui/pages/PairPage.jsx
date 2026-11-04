@@ -25,22 +25,32 @@ export default function PairPage() {
     <>
       <PageHeader icon={<QrcodeIcon />} title="Pair phone" />
       <PageBody>
-        <div className="page-col narrow">
-          <p className="muted">Scan this code from the Remote Browser Keeper app → Settings → Scan QR.</p>
-          {state.loading ? (
-            <Loader content="Generating…" />
-          ) : state.error ? (
-            <Message type="error" showIcon>{state.error}</Message>
-          ) : (
-            <Panel bordered className="center">
-              <img src={state.dataUrl} alt="Pairing QR code" width={260} height={260} className="qr" />
-              <div><Tag size="sm">{state.host}</Tag></div>
-              <p className="muted small">
+        <div className="page-wrap narrow">
+          <div className="split even">
+            <Panel bordered className="card center" header={<div className="card-title">Pairing code</div>}>
+              {state.loading ? (
+                <Loader content="Generating…" />
+              ) : state.error ? (
+                <Message type="error" showIcon>{state.error}</Message>
+              ) : (
+                <>
+                  <img src={state.dataUrl} alt="Pairing QR code" width={260} height={260} className="qr" />
+                  <div><Tag size="sm">{state.host}</Tag></div>
+                </>
+              )}
+            </Panel>
+            <Panel bordered className="card" header={<div className="card-title">How to pair</div>}>
+              <ol className="steps">
+                <li>Open the Remote Browser Keeper app on your phone.</li>
+                <li>Go to <b>Settings → Scan QR</b>.</li>
+                <li>Point the camera at the code. The phone connects at once.</li>
+              </ol>
+              <Message type="warning" showIcon className="dl-note">
                 This code contains your service URL and API token. Anyone who scans it can connect as you — show it only to
                 your own device.
-              </p>
+              </Message>
             </Panel>
-          )}
+          </div>
         </div>
       </PageBody>
     </>

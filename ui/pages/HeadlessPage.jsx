@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
-import { Button, Checkbox, Input, Loader, Message, Panel } from "rsuite";
+import { Button, Checkbox, Input, Message, Panel, Table } from "rsuite";
 import AdminIcon from "@rsuite/icons/Admin";
-import { ActionMenu, PageBody, PageHeader } from "@f-proj/ui-components";
+import ReloadIcon from "@rsuite/icons/Reload";
+import { ActionMenu, PageBody, PageHeader, ResponsiveTable } from "@f-proj/ui-components";
+import { filterByQuery } from "../lib/search.js";
+import { FilterCount, searchFilter } from "../components/ListFilters.jsx";
+
+const { Column, HeaderCell, Cell } = Table;
 
 // Pin headless Keepers (rbkeeper-unlock-v1). `rb-keeperd enroll` prints a public key and
 // its rbk1-… fingerprint; paste the key here with a name, and confirm the fingerprint shown
@@ -56,58 +61,93 @@ export default function HeadlessPage() {
     refresh();
   };
 
+  // Search the pinned list — local, no refetch (issue #31).
+  const [q, setQ] = useState("");
+  const keepers = list.ok ? list.keepers : [];
+  const visible = filterByQuery(keepers, q, (k) => [k.name, k.fingerprint, k.id]);
+
   return (
     <>
-      <PageHeader icon={<AdminIcon />} title="Headless Keepers" meta={list.ok ? `${list.keepers.length} pinned` : undefined} />
+      <PageHeader
+        icon={<AdminIcon />}
+        title="Headless Keepers"
+        meta={list.ok ? `${list.keepers.length} pinned` : undefined}
+        actions={[{ key: "refresh", label: "Refresh", icon: <ReloadIcon />, onClick: refresh }]}
+        filters={[searchFilter({ value: q, onChange: setQ, placeholder: "Search name, fingerprint, id…", width: 280 })]}
+      />
       <PageBody>
-        <div className="page-col">
-          <p className="muted">Keepers on servers that ask you for the vault key each time they restart.</p>
-
-          {list.loading ? <Loader /> :
-            !list.ok ? <Message type="error" showIcon>{list.error || "Unavailable."}</Message> :
-            list.keepers.length === 0 ? <p className="muted">None added yet.</p> :
-            <div className="list">
-              {list.keepers.map((k) => (
-                <Panel bordered className="entry" key={k.id}>
-                  <div className="row">
-                    <div className="grow">
-                      <div className="strong">{k.name}</div>
-                      <div className="mono small">{k.fingerprint || "—"}</div>
-                      <div className="mono small muted wrap">{k.id}</div>
-                    </div>
-                    <ActionMenu actions={[{
-                      key: "remove", label: "Remove", size: "sm", color: "red", appearance: "ghost", disabled: busy,
-                      confirm: { title: `Remove ${k.name}?`, body: "It can no longer ask this Keeper for the vault key until you add it again." },
-                      onClick: () => remove(k),
-                    }]} />
-                  </div>
-                </Panel>
-              ))}
-            </div>}
-
-          <Panel bordered header="Add headless Keeper">
-            <form className="form" onSubmit={(e) => { e.preventDefault(); add(); }}>
-              <Input placeholder="Name (e.g. build-server)" value={name} maxLength={32} disabled={busy} onChange={setName} />
-              <Input as="textarea" className="mono" placeholder="Public key the Keeper printed on first start" value={key} rows={3}
-                disabled={busy} spellCheck={false} onChange={setKey} />
-              {preview && (preview.ok ? (
+        <div className="page-wrap">
+          <p className="page-intro">Keepers on servers that ask you for the vault key each time they restart.</p>
+          {msg && <Message type={msg.ok ? "success" : "error"} showIcon closable onClose={() => setMsg(null)}>{msg.text}</Message>}
+          <div className="split">
+            <div className="stack">
+              {!list.loading && !list.ok ? <Message type="error" showIcon>{list.error || "Unavailable."}</Message> : (
                 <>
-                  <div>Fingerprint: <span className="mono strong">{preview.fingerprint}</span></div>
-                  <Checkbox checked={confirmed} disabled={busy} onChange={(_v, checked) => setConfirmed(checked)}>
-                    It matches the fingerprint <code>rb-keeperd enroll</code> printed
-                  </Checkbox>
+                  <FilterCount shown={visible.length} total={keepers.length} onClear={() => setQ("")} />
+                  <div className="table-card">
+                    <ResponsiveTable
+                      data={visible}
+                      rowKey="id"
+                      autoHeight
+                      wordWrap="break-word"
+                      loading={list.loading}
+                      renderEmpty={() => <div className="table-empty muted">{keepers.length === 0 ? "None added yet." : "No Keepers match this search."}</div>}
+                    >
+                      <Column flexGrow={1} minWidth={140} sortable dataKey="name">
+                        <HeaderCell>Name</HeaderCell>
+                        <Cell>{(k) => <span className="strong">{k.name}</span>}</Cell>
+                      </Column>
+                      <Column flexGrow={2} minWidth={220} mobileFull>
+                        <HeaderCell>Fingerprint · id</HeaderCell>
+                        <Cell>{(k) => (
+                          <div className="cell-stack">
+                            <span className="mono small">{k.fingerprint || "—"}</span>
+                            <span className="mono small muted wrap">{k.id}</span>
+                          </div>
+                        )}</Cell>
+                      </Column>
+                      <Column width={120} mobileLabel="Actions">
+                        <HeaderCell>{""}</HeaderCell>
+                        <Cell>{(k) => (
+                          <ActionMenu actions={[{
+                            key: "remove", label: "Remove", size: "xs", color: "red", appearance: "ghost", disabled: busy,
+                            confirm: { title: `Remove ${k.name}?`, body: "It can no longer ask this Keeper for the vault key until you add it again." },
+                            onClick: () => remove(k),
+                          }]} />
+                        )}</Cell>
+                      </Column>
+                    </ResponsiveTable>
+                  </div>
                 </>
-              ) : <Message type="error">{preview.error || "Not a public key."}</Message>)}
-              <Button type="submit" appearance="primary" loading={busy} disabled={busy || !name.trim() || !preview?.ok || !confirmed}>Add</Button>
-            </form>
-          </Panel>
+              )}
+            </div>
 
-          {msg && <Message type={msg.ok ? "success" : "error"} showIcon>{msg.text}</Message>}
-
-          <p className="muted small">
-            Only add a key whose fingerprint (rbk1-…) matches what the Keeper printed. Each restart then shows an Approve / Deny
-            request on the Approvals page; nothing is approved automatically.
-          </p>
+            <Panel bordered className="card" header={
+              <div>
+                <div className="card-title">Add headless Keeper</div>
+                <div className="card-sub">Paste the public key <code>rb-keeperd enroll</code> printed.</div>
+              </div>
+            }>
+              <form className="form" onSubmit={(e) => { e.preventDefault(); add(); }}>
+                <Input placeholder="Name (e.g. build-server)" value={name} maxLength={32} disabled={busy} onChange={setName} />
+                <Input as="textarea" className="mono" placeholder="Public key the Keeper printed on first start" value={key} rows={3}
+                  disabled={busy} spellCheck={false} onChange={setKey} />
+                {preview && (preview.ok ? (
+                  <>
+                    <div>Fingerprint: <span className="mono strong">{preview.fingerprint}</span></div>
+                    <Checkbox checked={confirmed} disabled={busy} onChange={(_v, checked) => setConfirmed(checked)}>
+                      It matches the fingerprint <code>rb-keeperd enroll</code> printed
+                    </Checkbox>
+                  </>
+                ) : <Message type="error">{preview.error || "Not a public key."}</Message>)}
+                <Button type="submit" appearance="primary" loading={busy} disabled={busy || !name.trim() || !preview?.ok || !confirmed}>Add</Button>
+                <p className="muted small">
+                  Only add a key whose fingerprint (rbk1-…) matches what the Keeper printed. Each restart then shows an Approve / Deny
+                  request on the Approvals page; nothing is approved automatically.
+                </p>
+              </form>
+            </Panel>
+          </div>
         </div>
       </PageBody>
     </>

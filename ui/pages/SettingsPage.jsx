@@ -82,8 +82,9 @@ export default function SettingsPage() {
     <>
       <PageHeader icon={<GearIcon />} title="Settings" meta="this device only" />
       <PageBody>
-        <div className="page-col">
-          <Panel bordered header="This device">
+        <div className="page-wrap">
+          <div className="card-grid">
+          <Panel bordered className="card" header={<div className="card-title">This device</div>}>
             {!info ? (
               <p className="muted">…</p>
             ) : info.error ? (
@@ -110,7 +111,7 @@ export default function SettingsPage() {
             )}
           </Panel>
 
-          <Panel bordered header="Password generation">
+          <Panel bordered className="card" header={<div className="card-title">Password generation</div>}>
             <div className="toggle-row">
               <Toggle checked={showWindow} disabled={loading || saving} loading={saving} onChange={(checked) => toggle(checked)} />
               <span>
@@ -128,6 +129,7 @@ export default function SettingsPage() {
               (unless a site rejects symbols). The AI never sees the value.
             </p>
           </Panel>
+          </div>
         </div>
       </PageBody>
     </>
