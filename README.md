@@ -236,6 +236,9 @@ mint the deploy key: generate an ed25519 pair in a temp dir, `POST
 repos/vasyaod/ui-components/keys` with the public half and `read_only=true`, then pipe the
 private half into `gh secret set UI_COMPONENTS_DEPLOY_KEY --repo
 all-completed/remote-browser-keeper` on stdin — never on a command line, never printed.
+This repo's CI uses the deploy key `remote-browser-keeper CI (read-only)` on
+`vasyaod/ui-components`, provisioned by issue #30; to rotate it, delete that key and the
+secret, then mint both again the same way.
 
 Config: `RBS_URL` (your service base URL, e.g. `https://rb.example.com`),
 `AC_API_KEY` / `~/.ac-api-key`.

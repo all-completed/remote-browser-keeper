@@ -19,6 +19,9 @@ name: build
 #       f-proj-phone, commune-service and remote-device-service. HOW TO PROVISION ONE:
 #       README.md, "Building it". The default GITHUB_TOKEN cannot serve: it is scoped
 #       to this repository only.
+#       PROVISIONED (issue #30, 2026-11-04): UI_COMPONENTS_DEPLOY_KEY, whose public half is
+#       the read-only deploy key "remote-browser-keeper CI (read-only)" on
+#       vasyaod/ui-components. Rotate the key and the secret together.
 #
 # This workflow has no `pull_request` trigger, so a fork's PR never runs it and never
 # sees the secret; only pushes by people with write access to this repo do.
