@@ -73,8 +73,8 @@ the sidebar moves between them in place.
 | `components/ImageViewer.jsx` | the **full-size screenshot** window — now an in-app full-size modal. |
 
 `ui/brand.js` is the brand the shell wears: the name, the app icon and the service colour
-(the accent and rsuite's primary palette). **Pending vasyaod/icons#11** it is the current
-app icon and its blue; the registry's flat icon and colour replace both there.
+(the accent and rsuite's primary palette). Both are the icons registry's
+(vasyaod/icons#11): the flat browser-window-and-key icon and emerald `#2BA673`.
 
 ### Headless Keepers (rbkeeper-unlock-v1)
 
@@ -496,25 +496,26 @@ copy of either package.
 
 ### Icons
 
-Two SVGs are the source of truth; **everything else in these two directories is
-derived and must be regenerated whenever its SVG changes** — a stale raster is what
-actually ships.
+The tray icon and the app icon have different sources, and **every raster is derived —
+a stale one is what actually ships**.
 
 | Source | Derived (committed) | Used by |
 | --- | --- | --- |
 | `src/assets/tray.svg` | `trayTemplate.png` (16×16), `trayTemplate@2x.png` (32×32) | `createTray()` in `main.js` — loaded by name, `@2x` picked up automatically |
-| `build/icon.svg` | `icon.png` (1024×1024), `icon.icns`, `icon.ico`; `src/assets/icon.png` (a copy of `icon.png`) | electron-builder (`package.json` → `build.mac/win/linux.icon`); the window/taskbar icon (`APP_ICON` in `main.js`) and the sidebar brand (`ui/brand.js`) |
+| [vasyaod/icons](https://github.com/vasyaod/icons) `desktop/remote-browser-keeper/` (drawn by its `tools/gen_icons.py --desktop remote-browser-keeper`, issue #11) | `build/icon.icns`, `build/icon.ico`, `build/icon.png` (1024×1024); `src/assets/icon.png` (a copy of `build/icon.png`) | electron-builder (`package.json` → `build.mac/win/linux.icon`); the window/taskbar icon (`APP_ICON` in `main.js`) and the sidebar brand (`ui/brand.js`) |
+
+The app icon is **not drawn here**: it is the service's icon on icons.f-proj.com, white
+browser window + key on the service colour `#2BA673` (which `ui/brand.js` also uses as
+the accent). To change it, change it in vasyaod/icons, then copy its files back:
 
 ```sh
 # tray template — rasterise at exactly 16 and 32 px, black-on-transparent
 rsvg-convert -w 16 -h 16 src/assets/tray.svg -o src/assets/trayTemplate.png
 rsvg-convert -w 32 -h 32 src/assets/tray.svg -o 'src/assets/trayTemplate@2x.png'
 
-# app icon — one 2048 px master, then area-average down to each size
-rsvg-convert -w 2048 -h 2048 build/icon.svg -o /tmp/icon-master.png
-sips -Z 1024 /tmp/icon-master.png --out build/icon.png
-#   .icns: iconutil -c icns from an .iconset of 16/32/64/128/256/512/1024
-#   .ico : the 16/24/32/48/64/128/256 sizes in one file
+# app icon — from a vasyaod/icons checkout
+cp ../icons/desktop/remote-browser-keeper/icon.{icns,ico,png} build/
+cp build/icon.png src/assets/icon.png
 ```
 
 Two rules the rasters have to keep holding:
@@ -522,9 +523,8 @@ Two rules the rasters have to keep holding:
 - **`trayTemplate*.png` stay black-on-transparent.** `setTemplateImage(true)` makes
   macOS discard the colour and use the alpha as a mask, tinting it for the current
   menu bar; a white PNG would be invisible in light mode.
-- **Downscale the app icon with an area average, not a sharpening filter.** Lanczos
-  overshoots at the white-on-blue edges and lays a light halo around the mark —
-  re-introducing exactly the faked depth `icon.svg` was flattened to remove.
+- **The app icon stays the registry's.** Don't redraw or re-rasterise it here; a local
+  edit drifts from icons.f-proj.com and from the colour in `ui/brand.js`.
 
 `src/assets/tray.svg` is also **the same drawing** as the Android status-bar icon in
 [all-completed/remote-browser-mobile](https://github.com/all-completed/remote-browser-mobile)

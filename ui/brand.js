@@ -2,16 +2,14 @@
 // service colour. The colour is the shell's accent AND rsuite's primary palette (buttons,
 // toggles, focus rings, links), so it is the app's accent colour everywhere.
 //
-// PENDING vasyaod/icons#11 — the flat app icon and service colour from the icons registry
-// (icons.f-proj.com). Until it lands, this is the current app icon (build/icon.svg, whose
-// background is #1D4EA6) and that same blue, so the window already wears one consistent
-// brand; swapping in the registry's icon + colour is this file plus src/assets/icon.png
-// and the three build/icon.* files.
+// Both come from the icons registry (icons.f-proj.com, vasyaod/icons#11): the flat
+// browser-window-and-key app icon (src/assets/icon.png, a copy of build/icon.png from the
+// registry's desktop/remote-browser-keeper/) and the service colour, emerald #2BA673.
 import icon from "../src/assets/icon.png";
 
 export const BRAND = {
   name: "Remote Browser Keeper",
   sub: "keeper",
   icon,
-  color: "#1D4EA6",
+  color: "#2BA673",
 };
