@@ -759,12 +759,16 @@ function tryAutofillCard(req) {
 }
 
 // ---------- The main window (issue #28) ----------
-// The Keeper is ONE window. Every surface that used to be a window of its own — the fill
-// prompt, the headless-Keeper approval, History, Cards, Saved fields, Headless Keepers,
-// Pair phone, Vault password, Settings, the full-size screenshot — is a page or an in-app
-// viewer inside it (ui/App.jsx). Main tells the renderer which page to show (app:navigate);
-// the renderer tells main when the user moves (app:page). Closing the window hides it: the
-// Keeper keeps running in the tray/menu bar, as it always has.
+// The Keeper is ONE window. Every surface that used to be a window of its own — History,
+// Cards, Saved fields, Headless Keepers, Pair phone, Vault password, Settings, the
+// full-size screenshot — is a page or an in-app viewer inside it (ui/App.jsx). Main tells
+// the renderer which page to show (app:navigate); the renderer tells main when the user
+// moves (app:page). Closing the window hides it: the Keeper keeps running in the tray/menu
+// bar, as it always has.
+//
+// The ONE exception (issue #34): a request waiting for the user — a fill request or a
+// headless Keeper asking to be unlocked — is answered in the small approval window below,
+// never here. A request never shows, raises or focuses this window.
 const PAGES = new Set(["approvals", "history", "cards", "savedfields", "headless", "pair", "vaultpw", "settings"]);
 // The app icon for the window/taskbar on Windows and Linux (macOS takes the bundle's).
 const APP_ICON = path.join(__dirname, "assets", "icon.png");
@@ -774,10 +778,6 @@ let mainPainted = false;       // ...and painted once (ready-to-show)
 let showWhenPainted = false;   // the user asked for the window before it had painted
 let currentPage = "approvals"; // what the window shows (kept across a renderer reload)
 let maximizeOnShow = false;    // open maximized on the first present (restoreBounds; issue #31)
-// The window was brought up FROM HIDDEN by a request: once nothing is waiting any more it
-// goes away again, the way the old prompt window closed itself after an answer. Cleared as
-// soon as the user opens the window or moves around in it — then it is theirs.
-let raisedForApproval = false;
 
 function windowStateFile() { return path.join(app.getPath("userData"), "window.json"); }
 function saveWindowState(win) {
@@ -798,8 +798,7 @@ function createMainWindow() {
     height: bounds.height,
     minWidth: MIN_BOUNDS.width,
     minHeight: MIN_BOUNDS.height,
-    // Hidden until it has something on screen: a page the user asked for (ready-to-show),
-    // or — when a request brought it up — the request itself (keeper:prompt-rendered).
+    // Hidden until it has painted the page the user asked for (ready-to-show).
     show: false,
     title: "Remote Browser Keeper",
     icon: APP_ICON,
@@ -829,41 +828,21 @@ function createMainWindow() {
   wc.on("will-navigate", (e) => e.preventDefault());
   wc.on("will-redirect", (e) => e.preventDefault());
   wc.on("will-attach-webview", (e) => e.preventDefault());
-  // Push the open request and the page the moment the document is loaded (the renderer
-  // also pulls both on mount — keeper:pending-request, app:state). Not "ready-to-show":
-  // that fires on first paint, so a window that loads but never paints would get the
-  // request never at all.
+  // Push the page the moment the document is loaded (the renderer also pulls it on mount
+  // — app:state).
   wc.on("did-finish-load", () => {
     if (mainWin !== win) return;
     mainLoaded = true;
     try { wc.send("app:navigate", currentPage); } catch { /* pulled on mount anyway */ }
     pushAppStatus();
-    if (promptState) {
-      promptState.loaded = true;
-      try { wc.send("keeper:request", promptState.payload); } catch { /* fail-prompt below */ }
-    }
   });
   win.once("ready-to-show", () => {
     if (mainWin !== win) return;
     mainPainted = true;
     if (showWhenPainted) { showWhenPainted = false; presentWindow(win); }
   });
-  // Every way the renderer can fail to come up, named — so the cause is in the log
-  // instead of being guessed at from a blank window, and an open request is reported as
-  // a broken approval UI rather than left waiting for an answer that cannot be given.
-  wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
-    if (isMainFrame && promptState) failPrompt(promptState.requestId, `renderer load failed (${code} ${desc}) ${url}`);
-  });
-  wc.on("preload-error", (_e, preloadPath, err) => {
-    if (promptState) failPrompt(promptState.requestId, `preload threw (${preloadPath}): ${(err && err.message) || err}`);
-  });
-  let goneReason = null;
-  wc.on("render-process-gone", (_e, details) => {
-    // A dead renderer cannot be answered from. Throw the window away (its "closed" below
-    // reports an open request); the next request or tray click builds a fresh one.
-    goneReason = `renderer process gone (${(details && details.reason) || "?"})`;
-    if (!win.isDestroyed()) win.destroy();
-  });
+  // A dead renderer is thrown away; the next tray click builds a fresh window.
+  wc.on("render-process-gone", () => { if (!win.isDestroyed()) win.destroy(); });
   let saveTimer = null;
   const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveWindowState(win), 500); };
   // maximize/unmaximize too, as Getway Chat does: the flag is what the next launch opens with
@@ -885,12 +864,6 @@ function createMainWindow() {
     mainLoaded = false;
     mainPainted = false;
     showWhenPainted = false;
-    raisedForApproval = false;
-    if (!promptState) return;
-    // The window went away under an open request. On screen (or quitting), that is the
-    // old "prompt window closed" — a decline. Never on screen, it is a broken approval UI.
-    if (promptState.rendered || app.isQuitting) declineCurrentPrompt();
-    else failPrompt(promptState.requestId, goneReason || "the window closed before the request was on screen");
   });
   loadWindow(win, "app");
   return win;
@@ -906,10 +879,10 @@ function presentWindow(win) {
   if (app.dock) { try { void app.dock.show(); } catch { /* ignore */ } }
 }
 
-// The user asked for the window (tray, dock): show it as soon as it has painted.
+// The user asked for the window (tray, dock): show it as soon as it has painted. Only the
+// user ever does — never a request (issue #34).
 function revealMainWindow() {
   const win = mainWin || createMainWindow();
-  raisedForApproval = false; // theirs now — it stays open when the queue drains
   if (mainPainted) presentWindow(win); else showWhenPainted = true;
 }
 
@@ -925,40 +898,165 @@ function openPage(page) {
   revealMainWindow();
 }
 
+// Closing the main window hides it. It holds no request (issue #34), so this answers
+// nothing: a request on screen is in the approval window, and stays there.
 function hideMainWindow() {
   const win = mainWin;
   if (!win || win.isDestroyed()) return;
-  raisedForApproval = false;
-  try { win.setAlwaysOnTop(false); } catch { /* ignore */ }
   win.hide();
   if (app.dock) { try { app.dock.hide(); } catch { /* ignore */ } }
-  // Closing the window while a fill request is on screen declines it — exactly what
-  // closing the old prompt window did — so the agent hears "cancelled" now instead of
-  // waiting out the deadline. A headless-Keeper request is NOT answered by a close: it
-  // stays pending in the tray until approved, denied, resolved elsewhere or expired.
-  if (promptState && promptState.rendered) declineCurrentPrompt();
 }
 
-// A request is on screen: bring the window up over everything, as the prompt window did.
-function raiseForApproval() {
-  const win = mainWin;
+// ---------- The approval window (issue #34) ----------
+// A request waiting for the user — the fill request at the head of the queue and any
+// headless Keeper asking to be unlocked — is answered in a small window of its own, the
+// way the prompt window was before issue #28: the whole main app in your face for a quick
+// approve/deny was disruptive. It is the only surface a request can be answered from.
+//
+//   - It comes up by itself when a request arrives and is gone again once nothing waits.
+//   - It never touches the main window: that one is not shown, raised or focused, whether
+//     it is closed, minimized, behind other apps or full screen. On macOS the approval
+//     window is a non-activating panel, so showing and focusing it does not activate the
+//     app — which would bring the main window forward with it, or switch to its Space when
+//     it is full screen — and it floats over full-screen apps (Electron's `type: "panel"`).
+//   - One request on screen at a time, as main's queue hands them over; "N more waiting"
+//     is said under it and the tray lists every one. An answer moves the same window on to
+//     the next; nothing is dropped.
+//   - Closing it declines the fill request on screen, as closing the old prompt window did
+//     (the next one in the queue then comes up); a headless-Keeper request is not answered
+//     by a close — it stays in the tray until approved, denied, resolved elsewhere or
+//     expired.
+//   - Its own document (approval.html) and its own preload: it can reach the request
+//     channels and nothing else, and the main window can no longer reach them at all.
+const APPROVAL_SIZE = { width: 520, height: 680, minWidth: 380, minHeight: 320 };
+let approvalWin = null;
+let approvalLoaded = false;        // its document finished loading (did-finish-load)
+let approvalPainted = false;       // ...and painted once (ready-to-show)
+let showApprovalWhenPainted = false;
+
+function createApprovalWindow() {
+  const win = new BrowserWindow({
+    width: APPROVAL_SIZE.width,
+    height: APPROVAL_SIZE.height,
+    minWidth: APPROVAL_SIZE.minWidth,
+    minHeight: APPROVAL_SIZE.minHeight,
+    // Hidden until it has something on screen: the fill request it was built for
+    // (keeper:prompt-rendered, issue #3) or, for an unlock request, its first paint.
+    show: false,
+    // macOS: a non-activating panel — see the section comment. Elsewhere focusing one
+    // window does not bring the app's other windows with it.
+    ...(process.platform === "darwin" ? { type: "panel" } : {}),
+    alwaysOnTop: true,
+    skipTaskbar: true,    // a prompt, not a second app window (the tray lists what waits)
+    fullscreenable: false,
+    minimizable: false,
+    maximizable: false,
+    title: "Approve — Remote Browser Keeper",
+    icon: APP_ICON,
+    autoHideMenuBar: true,
+    backgroundColor: "#0f131a", // the ui-components ground, as the main window
+    webPreferences: {
+      preload: path.join(__dirname, "approval-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  approvalWin = win;
+  approvalLoaded = false;
+  approvalPainted = false;
+  const wc = win.webContents;
+  // Local content only, as the main window: no navigation, no popups, no webviews.
+  wc.setWindowOpenHandler(() => ({ action: "deny" }));
+  wc.on("will-navigate", (e) => e.preventDefault());
+  wc.on("will-redirect", (e) => e.preventDefault());
+  wc.on("will-attach-webview", (e) => e.preventDefault());
+  // Push the open request the moment the document is loaded (the renderer also pulls it on
+  // mount — keeper:pending-request, unlock:get). Not "ready-to-show": that fires on first
+  // paint, so a window that loads but never paints would get the request never at all.
+  wc.on("did-finish-load", () => {
+    if (approvalWin !== win) return;
+    approvalLoaded = true;
+    pushAppStatus();
+    if (promptState) {
+      promptState.loaded = true;
+      try { wc.send("keeper:request", promptState.payload); } catch { /* fail-prompt below */ }
+    }
+    if (pendingUnlocks.size) { try { wc.send("unlock:changed"); } catch { /* pulled on mount */ } }
+  });
+  win.once("ready-to-show", () => {
+    if (approvalWin !== win) return;
+    approvalPainted = true;
+    if (showApprovalWhenPainted) { showApprovalWhenPainted = false; presentApproval(); }
+  });
+  // Every way the renderer can fail to come up, named — so the cause is in the log
+  // instead of being guessed at from a blank window, and an open request is reported as
+  // a broken approval UI rather than left waiting for an answer that cannot be given.
+  wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame && promptState) failPrompt(promptState.requestId, `renderer load failed (${code} ${desc}) ${url}`);
+  });
+  wc.on("preload-error", (_e, preloadPath, err) => {
+    if (promptState) failPrompt(promptState.requestId, `preload threw (${preloadPath}): ${(err && err.message) || err}`);
+  });
+  let goneReason = null;
+  wc.on("render-process-gone", (_e, details) => {
+    // A dead renderer cannot be answered from. Throw the window away (its "closed" below
+    // reports an open request); the next request builds a fresh one.
+    goneReason = `renderer process gone (${(details && details.reason) || "?"})`;
+    if (!win.isDestroyed()) win.destroy();
+  });
+  // ✕ closes it for real — it is rebuilt for the next request.
+  win.on("closed", () => {
+    if (approvalWin !== win) return;
+    approvalWin = null;
+    approvalLoaded = false;
+    approvalPainted = false;
+    showApprovalWhenPainted = false;
+    if (!promptState) return;
+    // The window went away under an open request. On screen (or quitting), that is the
+    // old "prompt window closed" — a decline. Never on screen, it is a broken approval UI.
+    if (promptState.rendered || app.isQuitting) declineCurrentPrompt();
+    else failPrompt(promptState.requestId, goneReason || "the window closed before the request was on screen");
+  });
+  loadWindow(win, "approval");
+  return win;
+}
+
+// Put the approval window in front of everything, with the keyboard — over other apps and
+// over full-screen ones, as the prompt window was. The main window is left exactly where
+// it is (and, being a different window, is never what this shows or focuses).
+function presentApproval() {
+  const win = approvalWin;
   if (!win || win.isDestroyed()) return;
-  if (!win.isVisible() || win.isMinimized()) raisedForApproval = true;
   try { win.setAlwaysOnTop(true, "screen-saver"); } catch { /* ignore */ }
-  presentWindow(win);
+  win.show();
+  win.focus();
 }
 
-// Nothing is waiting for the user any more: stop floating over other apps, and if a
-// request is what brought the window up, put it away again.
-function settleWindow() {
+// Show the approval window for what is waiting, as soon as it can be shown: a fill request
+// only once it is painted (it appears by itself then — issue #3), an unlock request once
+// the document has painted.
+function revealApproval() {
+  if (!promptState && !pendingUnlocks.size) return;
+  if (!approvalWin) createApprovalWindow();
+  // Never force a not-yet-painted fill request on screen — that is the blank window again
+  // — unless an unlock request already gives the window something to show.
+  if (promptState && !promptState.rendered && !pendingUnlocks.size) return;
+  if (approvalPainted) presentApproval(); else showApprovalWhenPainted = true;
+}
+
+// Nothing is waiting for the user any more: the approval window has done its job.
+function settleApproval() {
   if (promptState || queue.length || pendingUnlocks.size) return;
-  const win = mainWin;
-  if (!win || win.isDestroyed()) return;
-  try { win.setAlwaysOnTop(false); } catch { /* ignore */ }
-  if (raisedForApproval) {
-    raisedForApproval = false;
-    win.hide();
-    if (app.dock) { try { app.dock.hide(); } catch { /* ignore */ } }
+  const win = approvalWin;
+  if (win && !win.isDestroyed()) win.destroy(); // "closed" finds no request — nothing is answered
+}
+
+function sendToApproval(channel, arg) {
+  if (approvalWin && approvalLoaded && !approvalWin.isDestroyed()) {
+    try { approvalWin.webContents.send(channel, arg); } catch { /* the renderer also pulls */ }
   }
 }
 
@@ -980,23 +1078,30 @@ function appStatus() {
     version: app.getVersion(),
   };
 }
+// Both windows: the approval window says how many more requests wait (issue #34).
 function pushAppStatus() {
+  const status = appStatus();
   if (mainWin && mainLoaded && !mainWin.isDestroyed()) {
-    try { mainWin.webContents.send("app:status", appStatus()); } catch { /* next update */ }
+    try { mainWin.webContents.send("app:status", status); } catch { /* next update */ }
   }
+  sendToApproval("app:status", status);
 }
 
 ipcMain.handle("app:state", (e) => {
-  if (!fromWindow(e, "app:state", mainWin)) return null;
+  if (!fromWindow(e, "app:state", mainWin, approvalWin)) return null;
   return { page: currentPage, status: appStatus() };
 });
-// The user moved to another page in the sidebar. Remembered so a reload lands on it, and
-// it makes the window theirs: it no longer hides itself when the queue drains.
+// The user moved to another page in the sidebar. Remembered so a reload lands on it.
 ipcMain.on("app:page", (e, page) => {
   if (!fromWindow(e, "app:page", mainWin)) return;
   if (!PAGES.has(page)) return;
   currentPage = page;
-  raisedForApproval = false;
+});
+// The Approvals page's "Show" — bring the approval window back up for what is waiting
+// (after the user closed it on an unlock request, or it got lost behind something).
+ipcMain.on("app:show-approval", (e) => {
+  if (!fromWindow(e, "app:show-approval", mainWin)) return;
+  revealApproval();
 });
 // The in-app warnings ("approval UI failed", "an answer never arrived") are dismissed
 // from the window as well as from the tray.
@@ -1009,9 +1114,10 @@ ipcMain.on("app:dismiss", (e, what) => {
 });
 
 // ---------- Fill requests on screen ----------
-// The Approvals page is the ONLY surface a fill request can be answered from, so its
+// The approval window is the ONLY surface a fill request can be answered from, so its
 // render is supervised (issue #3: the window opened but painted nothing, and the request
-// could never be approved). Three rules, unchanged by the move to one window:
+// could never be approved). Three rules, unchanged by the moves to one window (#28) and
+// back to an approval window of its own (#34):
 //   1. a window that a request brings up stays hidden until the renderer confirms the
 //      request is on screen, so an empty frame is never shown;
 //   2. the payload is BOTH pushed (keeper:request) and pulled (keeper:pending-request),
@@ -1025,7 +1131,7 @@ let lastPromptFailure = null;  // { requestId, reason, at } — shown in the tra
 function showNextPrompt() {
   updateTray(); // every caller has just changed the queue — keep its pending list truthful
   if (promptState || app.isQuitting) return;
-  if (queue.length === 0) { settleWindow(); return; }
+  if (queue.length === 0) { settleApproval(); return; }
   const requestId = queue[0];
   const req = pending.get(requestId);
   if (!req) { queue.shift(); return showNextPrompt(); }
@@ -1050,8 +1156,8 @@ function showNextPrompt() {
     host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
   };
   promptState = { requestId, payload, loaded: false, rendered: false, timer: null };
-  const win = mainWin || createMainWindow();
-  if (mainLoaded) {
+  const win = approvalWin || createApprovalWindow();
+  if (approvalLoaded) {
     promptState.loaded = true;
     try { win.webContents.send("keeper:request", payload); } catch { /* fail-prompt below */ }
   }
@@ -1070,13 +1176,11 @@ function endPrompt(requestId, { tellRenderer = true } = {}) {
   if (!promptState || promptState.requestId !== requestId) return false;
   clearTimeout(promptState.timer);
   promptState = null;
-  if (tellRenderer && mainWin && mainLoaded && !mainWin.isDestroyed()) {
-    try { mainWin.webContents.send("keeper:request-gone", { request_id: requestId }); } catch { /* ignore */ }
-  }
+  if (tellRenderer) sendToApproval("keeper:request-gone", { request_id: requestId });
   return true;
 }
 
-// The request on screen is declined without a reason: the window was closed under it.
+// The request on screen is declined without a reason: the approval window was closed under it.
 function declineCurrentPrompt() {
   if (!promptState) return;
   const requestId = promptState.requestId;
@@ -1097,20 +1201,20 @@ function declineCurrentPrompt() {
 // is a hidden window shown, so the user never sees an empty approval page, and the render
 // watchdog stands down.
 ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:prompt-rendered", mainWin)) return;
+  if (!fromWindow(e, "keeper:prompt-rendered", approvalWin)) return;
   if (!promptState || promptState.requestId !== request_id) return;
   if (promptState.rendered) return;
   promptState.rendered = true;
   clearTimeout(promptState.timer);
   promptState.timer = null;
-  currentPage = "approvals"; // the renderer switched to it to draw the request
-  raiseForApproval();
+  showApprovalWhenPainted = false; // it is painted: show it now
+  presentApproval();
   try { shell.beep(); } catch { /* play the OS alert sound to announce the prompt */ }
 });
 // Pull side of the delivery: the renderer asks for the request it must draw, so it does
 // not depend on having been listening when main pushed it.
 ipcMain.handle("keeper:pending-request", (e) => {
-  if (!fromWindow(e, "keeper:pending-request", mainWin)) return null;
+  if (!fromWindow(e, "keeper:pending-request", approvalWin)) return null;
   if (!promptState) return null;
   return promptState.payload;
 });
@@ -1142,11 +1246,14 @@ function failPrompt(requestId, reason) {
   endPrompt(requestId);
   // A hidden window whose document never came up is thrown away, so the next request
   // starts on a fresh one instead of inheriting whatever broke this one. A window the
-  // user can see keeps its page (the failure is named in the tray and in the window).
-  const w = mainWin;
-  if (w && !w.isDestroyed() && !w.isVisible() && !(loaded && mainPainted)) w.destroy();
+  // user can see keeps its page (the failure is named in the tray and on the main
+  // window's Approvals page).
+  const w = approvalWin;
+  if (w && !w.isDestroyed() && !w.isVisible() && !(loaded && approvalPainted)) w.destroy();
   updateTray();
   showNextPrompt();
+  // An unlock request that was waiting on the window just thrown away gets a fresh one.
+  if (!approvalWin && pendingUnlocks.size) showUnlock();
 }
 
 // Bring a queued request to the front: the tray lists everything awaiting approval, so a
@@ -1161,7 +1268,7 @@ function focusRequest(requestId) {
     }
     // Never force a not-yet-painted request on screen — that is the blank window again.
     // It appears by itself the moment it renders, or fails loudly (failPrompt).
-    if (promptState.rendered) { navigateTo("approvals"); raiseForApproval(); }
+    if (promptState.rendered) revealApproval();
     updateTray();
     return;
   }
@@ -1239,9 +1346,7 @@ function expireRequest(requestId) {
   // fail to render, and must not be reported as a broken approval UI.
   promptState.expired = true;
   if (promptState.timer) { clearTimeout(promptState.timer); promptState.timer = null; }
-  if (mainWin && mainLoaded) {
-    try { mainWin.webContents.send("keeper:expired", { request_id: requestId }); } catch { /* it is going anyway */ }
-  }
+  sendToApproval("keeper:expired", { request_id: requestId });
   setTimeout(() => { if (endPrompt(requestId)) showNextPrompt(); }, EXPIRED_LINGER_MS);
   updateTray(); // it is out of the queue already; the page is only saying goodbye
 }
@@ -1251,7 +1356,7 @@ function expireRequest(requestId) {
 // does not tick through suspend). Verified against main's own copy of the deadline, so the
 // renderer can never retire a request early.
 ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:prompt-expired", mainWin)) return;
+  if (!fromWindow(e, "keeper:prompt-expired", approvalWin)) return;
   if (!promptState || promptState.requestId !== request_id) return;
   const req = pending.get(request_id);
   if (!req || req._expires_at == null || Date.now() < req._expires_at) return;
@@ -1259,7 +1364,7 @@ ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
 });
 
 ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
-  if (!fromWindow(e, "keeper:submit", mainWin)) return;
+  if (!fromWindow(e, "keeper:submit", approvalWin)) return;
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
 });
 // Decline. The optional `reason` is the user's short note about WHY (issue #11): it rides
@@ -1268,7 +1373,7 @@ ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
 // is the authority on what goes on the wire — and omitted entirely when there is none, so
 // a plain one-tap Cancel sends byte-for-byte what it always did.
 ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
-  if (!fromWindow(e, "keeper:cancel", mainWin)) return;
+  if (!fromWindow(e, "keeper:cancel", approvalWin)) return;
   // An expired request is already out of `pending`: there is nothing left to answer, but
   // the page must still let go of it when the user dismisses it — resolveRequest would
   // no-op and leave the queue stuck behind a prompt nobody can get rid of. This does NOT
@@ -1287,7 +1392,7 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
 // (when the user picks a card to pre-fill). Values stay local; the user reviews
 // and sends. Returns [{selector,value}].
 ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
-  if (!fromWindow(e, "keeper:card-values", mainWin)) return [];
+  if (!fromWindow(e, "keeper:card-values", approvalWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1301,7 +1406,7 @@ ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
 // "Auto-fill on this site next time": approve the request's domain for the chosen
 // card and persist it. Future requests from that domain fill silently.
 ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) => {
-  if (!fromWindow(e, "keeper:remember-card-domain", mainWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:remember-card-domain", approvalWin)) return { ok: false };
   try {
     const req = pending.get(request_id);
     if (!req) return { ok: false };
@@ -1318,7 +1423,7 @@ ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) 
 
 // "Allow for all sites": approve the chosen card for every site (wildcard).
 ipcMain.handle("keeper:remember-card-all-sites", (e, { card_id } = {}) => {
-  if (!fromWindow(e, "keeper:remember-card-all-sites", mainWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:remember-card-all-sites", approvalWin)) return { ok: false };
   try {
     const base = cardBaseUrl();
     const store = loadCards(base);
@@ -1447,11 +1552,11 @@ function finishUnlock(requestId) {
   clearTimeout(u.timer);
   pendingUnlocks.delete(requestId);
   updateTray();
-  if (mainWin && mainLoaded) { try { mainWin.webContents.send("unlock:changed"); } catch { /* ignore */ } }
-  settleWindow();
+  sendToApproval("unlock:changed");
+  settleApproval();
 }
 
-// What the Approvals page shows: the oldest pending request. Identifiers, the pin's name and
+// What the approval window shows: the oldest pending request. Identifiers, the pin's name and
 // the comparison code only — nothing secret is in a request.
 function currentUnlock() {
   const u = pendingUnlocks.values().next().value;
@@ -1519,31 +1624,28 @@ function denyUnlock(requestId) {
   return { ok: true };
 }
 
-// Show the request on the Approvals page, bringing the window up over everything the way
-// the separate approval window used to. Not render-supervised like a fill request: the
-// unlock request is pulled (unlock:get) and an unanswered one simply expires.
+// Show the request in the approval window, over everything — never in the main window
+// (issue #34). Not render-supervised like a fill request: the unlock request is pulled
+// (unlock:get) and an unanswered one simply expires.
 function showUnlock() {
   if (!pendingUnlocks.size) return;
-  const win = mainWin || createMainWindow();
-  navigateTo("approvals");
-  if (mainLoaded) { try { win.webContents.send("unlock:changed"); } catch { /* pulled on mount */ } }
-  if (!win.isVisible()) raisedForApproval = true;
-  try { win.setAlwaysOnTop(true, "screen-saver"); } catch { /* ignore */ }
-  if (mainPainted) presentWindow(win); else showWhenPainted = true;
+  if (!approvalWin) createApprovalWindow();
+  sendToApproval("unlock:changed");
+  if (approvalPainted) presentApproval(); else showApprovalWhenPainted = true;
 }
 
 ipcMain.handle("unlock:get", (e) => {
-  if (!fromWindow(e, "unlock:get", mainWin)) return null;
+  if (!fromWindow(e, "unlock:get", approvalWin)) return null;
   return currentUnlock();
 });
 // Both answers name the request the user was looking at, so a request that arrived
 // meanwhile can't be approved in its place.
 ipcMain.handle("unlock:approve", async (e, { requestId } = {}) => {
-  if (!fromWindow(e, "unlock:approve", mainWin)) return { ok: false };
+  if (!fromWindow(e, "unlock:approve", approvalWin)) return { ok: false };
   return approveUnlock(String(requestId || ""));
 });
 ipcMain.handle("unlock:deny", (e, { requestId } = {}) => {
-  if (!fromWindow(e, "unlock:deny", mainWin)) return { ok: false };
+  if (!fromWindow(e, "unlock:deny", approvalWin)) return { ok: false };
   return denyUnlock(String(requestId || ""));
 });
 
@@ -1667,9 +1769,9 @@ ipcMain.handle("pair:qr", async (e) => {
 // Vault key status for the UI: whether a key is held, whether it's a custom (user)
 // password, and whether this device is out of sync (needs re-pair).
 ipcMain.handle("keeper:vault-status", (e) => {
-  // Two pages ask this one: Approvals (to default a generated password to the vault)
-  // and Vault password.
-  if (!fromWindow(e, "keeper:vault-status", mainWin)) return { ok: false };
+  // Two windows ask this one: the approval window (to default a generated password to the
+  // vault) and the main window's Vault password page.
+  if (!fromWindow(e, "keeper:vault-status", mainWin, approvalWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const k = loadVaultKey(baseUrl);
@@ -1836,7 +1938,7 @@ function tryAutofillFields(req) {
 // fields (so the prompt prefills them), and save the submitted values per scope.
 // One-time codes are neither prefilled nor saved (onetimecode.js).
 ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:saved-values", mainWin)) return [];
+  if (!fromWindow(e, "keeper:saved-values", approvalWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1854,7 +1956,7 @@ ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
   }
 });
 ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {}) => {
-  if (!fromWindow(e, "keeper:save-fields", mainWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:save-fields", approvalWin)) return { ok: false };
   try {
     if (!Array.isArray(values) || !["session", "forever", "vault", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);

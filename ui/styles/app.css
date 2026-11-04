@@ -177,3 +177,16 @@ p { margin: 0; }
 /* Numbered / bulleted how-to inside a card (Pair phone, Vault password). */
 .steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; color: var(--app-color-text-secondary); }
 .table-empty { padding: 24px 16px; text-align: center; }
+
+/* ── The approval window (issue #34) ──────────────────────────────────────────
+   A small window of its own for the request waiting for the user. It wears the main
+   window's AppShell (theme + brand palette) with no navigation, so the shell's drawer and
+   burger have nothing to offer: they are not drawn, and the title bar does not keep room
+   for the burger. */
+.approval-shell .app-mobile-menu-button,
+.approval-shell .app-sidebar,
+.approval-shell .app-sidebar-backdrop { display: none; }
+.approval-shell .page-header .page-title { padding-left: 16px; min-height: var(--keeper-bar-height); }
+.approval-icon { width: 22px; height: 22px; border-radius: 5px; display: block; }
+.approval-wrap { box-sizing: border-box; width: 100%; max-width: 720px; margin: 0 auto; padding: 4px 0 16px; display: flex; flex-direction: column; gap: 12px; }
+.approval-wrap .proof img { max-height: 220px; }

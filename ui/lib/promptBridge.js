@@ -1,4 +1,4 @@
-// The fill request on screen, delivered to the Approvals page. Registered at module-load
+// The fill request on screen, delivered to the approval window (issue #34). Registered at module-load
 // time (before React mounts) so a fill_request that arrives during/after window show is
 // never missed.
 //
