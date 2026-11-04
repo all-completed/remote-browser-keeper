@@ -26,6 +26,7 @@ import { normalizeDeclineReason } from "./declinereason.js";
 import { requestDeadline } from "./deadline.js";
 import { createOutbox } from "./outbox.js";
 import { rendererUrl, refuseSender } from "./ipcsender.js";
+import { restore as restoreBounds, snapshot as snapshotBounds, MIN as MIN_BOUNDS } from "./windowstate.js";
 import { isOneTimeCode, autofillValues, savableValues } from "./onetimecode.js";
 import {
   UNLOCK_TIMEOUT_MS, parsePublicKey, isValidName, pinEntry, pinTombstone, mergeHeadlessPins, activePins,
@@ -35,20 +36,21 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Renderer is built by Vite to ../renderer-dist (one HTML per window). With
-// KEEPER_DEV=1, load from the Vite dev server instead for hot-reload.
+// Renderer is built by Vite to ../renderer-dist — ONE document, app.html, the whole UI of
+// the one window (issue #28). With KEEPER_DEV=1, load from the Vite dev server instead for
+// hot-reload.
 const KEEPER_DEV = process.env.KEEPER_DEV === "1";
 const RENDERER_DIR = path.join(__dirname, "..", "renderer-dist");
 // The one definition of "our own document", used BOTH to load a window and to check that
 // a message really came from it (see ipcsender.js) — so the two cannot drift apart.
 function pageUrl(name) { return rendererUrl(name, { dev: KEEPER_DEV, rendererDir: RENDERER_DIR }); }
 function loadWindow(win, name) {
-  // Which page this window holds. The IPC guard reads it back off the window to know
+  // Which document this window holds. The IPC guard reads it back off the window to know
   // which document a message from it is supposed to be coming from.
   win.keeperPage = name;
   // A window whose content fails to load still shows its frame, so the failure would
-  // otherwise be a silent empty box. Name it in the log for EVERY window (the prompt
-  // window additionally turns it into a user-visible failure — see failPrompt).
+  // otherwise be a silent empty box. Name it in the log (an open fill request additionally
+  // turns it into a user-visible failure — see failPrompt).
   const wc = win.webContents;
   wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
     if (isMainFrame) console.error(`[keeper] ${name} window failed to load: ${code} ${desc} ${url}`);
@@ -62,13 +64,13 @@ function loadWindow(win, name) {
   win.loadURL(pageUrl(name));
 }
 
-// Every ipcMain handler below names the window(s) it serves and starts with this: the
-// message is answered only when it came from one of them, from that window's top frame,
-// with our own document still in it. See ipcsender.js for why — in short, `ipcMain` has no
-// idea which window a channel belongs to, so without this every handler serves every
-// renderer, and the ones that carry a secret (pair:qr, fields:reveal, keeper:card-values,
-// keeper:saved-values, cards:load) or answer a request (keeper:submit) serve it to
-// whichever renderer asks first.
+// Every ipcMain handler below names the window it serves — since issue #28 that is always
+// the one main window — and starts with this: the message is answered only when it came
+// from that window's top frame, with our own document (app.html) still in it. See
+// ipcsender.js for why — in short, `ipcMain` has no idea which renderer a channel belongs
+// to, so without this every handler serves every renderer and every frame, and the ones
+// that carry a secret (pair:qr, fields:reveal, keeper:card-values, keeper:saved-values,
+// cards:load) or answer a request (keeper:submit) serve it to whichever asks first.
 //
 // A refusal is a real event — the app itself never produces one — so it is logged rather
 // than swallowed. The handler then returns its ordinary "nothing" (null / [] / {ok:false}),
@@ -214,8 +216,6 @@ function readHistory() {
 }
 
 let tray = null;
-let promptWin = null;
-let historyWin = null;
 let ws = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000; // backoff, capped at 30s
@@ -225,7 +225,7 @@ let lastRx = 0; // last time any frame arrived (pong or otherwise)
 const HEARTBEAT_MS = 25000; // how often we ping the service
 const DEAD_AFTER_MS = 70000; // no inbound frame this long => socket is dead
 const pending = new Map(); // request_id -> request payload (awaiting user)
-const queue = []; // request_ids waiting for the prompt window
+const queue = []; // request_ids waiting for the Approvals page (queue[0] is on screen)
 // Answers the socket could not take (issue #19). A fill/secret answer is never dropped on
 // the floor: it waits here for the reconnect, and if the request dies first that is
 // reported, not swallowed. In memory only — it holds the user's values. See outbox.js.
@@ -758,23 +758,268 @@ function tryAutofillCard(req) {
   return true;
 }
 
-// ---------- Prompt window ----------
-// The prompt window is the ONLY surface a fill request can be answered from, so its
+// ---------- The main window (issue #28) ----------
+// The Keeper is ONE window. Every surface that used to be a window of its own — the fill
+// prompt, the headless-Keeper approval, History, Cards, Saved fields, Headless Keepers,
+// Pair phone, Vault password, Settings, the full-size screenshot — is a page or an in-app
+// viewer inside it (ui/App.jsx). Main tells the renderer which page to show (app:navigate);
+// the renderer tells main when the user moves (app:page). Closing the window hides it: the
+// Keeper keeps running in the tray/menu bar, as it always has.
+const PAGES = new Set(["approvals", "history", "cards", "savedfields", "headless", "pair", "vaultpw", "settings"]);
+// The app icon for the window/taskbar on Windows and Linux (macOS takes the bundle's).
+const APP_ICON = path.join(__dirname, "assets", "icon.png");
+let mainWin = null;
+let mainLoaded = false;        // the current document finished loading (did-finish-load)
+let mainPainted = false;       // ...and painted once (ready-to-show)
+let showWhenPainted = false;   // the user asked for the window before it had painted
+let currentPage = "approvals"; // what the window shows (kept across a renderer reload)
+// The window was brought up FROM HIDDEN by a request: once nothing is waiting any more it
+// goes away again, the way the old prompt window closed itself after an answer. Cleared as
+// soon as the user opens the window or moves around in it — then it is theirs.
+let raisedForApproval = false;
+
+function windowStateFile() { return path.join(app.getPath("userData"), "window.json"); }
+function saveWindowState(win) {
+  try {
+    if (!win || win.isDestroyed()) return;
+    fs.writeFileSync(windowStateFile(), JSON.stringify(snapshotBounds(win.getNormalBounds(), win.isMaximized())));
+  } catch { /* the next launch just opens at the default size */ }
+}
+
+function createMainWindow() {
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(windowStateFile(), "utf8")); } catch { /* first run */ }
+  const bounds = restoreBounds(saved, screen.getAllDisplays());
+  const win = new BrowserWindow({
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: MIN_BOUNDS.width,
+    minHeight: MIN_BOUNDS.height,
+    // Hidden until it has something on screen: a page the user asked for (ready-to-show),
+    // or — when a request brought it up — the request itself (keeper:prompt-rendered).
+    show: false,
+    title: "Remote Browser Keeper",
+    icon: APP_ICON,
+    autoHideMenuBar: true,
+    backgroundColor: "#0f131a", // the ui-components ground, so a resize never flashes another colour
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,          // renderer runs sandboxed; only the preload bridge is exposed
+      webviewTag: false,
+      spellcheck: false,
+    },
+  });
+  if (bounds.maximized) win.maximize();
+  mainWin = win;
+  mainLoaded = false;
+  mainPainted = false;
+  const wc = win.webContents;
+  // The window only ever shows local content. Deny any attempt to navigate away or open a
+  // new window (defense-in-depth on top of the renderer CSP), so no server/agent-supplied
+  // string can turn into a navigation or popup.
+  wc.setWindowOpenHandler(() => ({ action: "deny" }));
+  wc.on("will-navigate", (e) => e.preventDefault());
+  wc.on("will-redirect", (e) => e.preventDefault());
+  wc.on("will-attach-webview", (e) => e.preventDefault());
+  // Push the open request and the page the moment the document is loaded (the renderer
+  // also pulls both on mount — keeper:pending-request, app:state). Not "ready-to-show":
+  // that fires on first paint, so a window that loads but never paints would get the
+  // request never at all.
+  wc.on("did-finish-load", () => {
+    if (mainWin !== win) return;
+    mainLoaded = true;
+    try { wc.send("app:navigate", currentPage); } catch { /* pulled on mount anyway */ }
+    pushAppStatus();
+    if (promptState) {
+      promptState.loaded = true;
+      try { wc.send("keeper:request", promptState.payload); } catch { /* fail-prompt below */ }
+    }
+  });
+  win.once("ready-to-show", () => {
+    if (mainWin !== win) return;
+    mainPainted = true;
+    if (showWhenPainted) { showWhenPainted = false; presentWindow(win); }
+  });
+  // Every way the renderer can fail to come up, named — so the cause is in the log
+  // instead of being guessed at from a blank window, and an open request is reported as
+  // a broken approval UI rather than left waiting for an answer that cannot be given.
+  wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame && promptState) failPrompt(promptState.requestId, `renderer load failed (${code} ${desc}) ${url}`);
+  });
+  wc.on("preload-error", (_e, preloadPath, err) => {
+    if (promptState) failPrompt(promptState.requestId, `preload threw (${preloadPath}): ${(err && err.message) || err}`);
+  });
+  let goneReason = null;
+  wc.on("render-process-gone", (_e, details) => {
+    // A dead renderer cannot be answered from. Throw the window away (its "closed" below
+    // reports an open request); the next request or tray click builds a fresh one.
+    goneReason = `renderer process gone (${(details && details.reason) || "?"})`;
+    if (!win.isDestroyed()) win.destroy();
+  });
+  let saveTimer = null;
+  const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => saveWindowState(win), 500); };
+  win.on("resize", saveSoon);
+  win.on("move", saveSoon);
+  // Closing hides. It never quits (Quit is in the tray), and it is not a way to lose the
+  // window's state: the next open shows the same page.
+  win.on("close", (e) => {
+    clearTimeout(saveTimer);
+    saveWindowState(win);
+    if (app.isQuitting) return;
+    e.preventDefault();
+    hideMainWindow();
+  });
+  win.on("closed", () => {
+    clearTimeout(saveTimer);
+    if (mainWin !== win) return;
+    mainWin = null;
+    mainLoaded = false;
+    mainPainted = false;
+    showWhenPainted = false;
+    raisedForApproval = false;
+    if (!promptState) return;
+    // The window went away under an open request. On screen (or quitting), that is the
+    // old "prompt window closed" — a decline. Never on screen, it is a broken approval UI.
+    if (promptState.rendered || app.isQuitting) declineCurrentPrompt();
+    else failPrompt(promptState.requestId, goneReason || "the window closed before the request was on screen");
+  });
+  loadWindow(win, "app");
+  return win;
+}
+
+function presentWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  // A normal app while its window is open: a dock icon (macOS) to switch back to it.
+  if (app.dock) { try { void app.dock.show(); } catch { /* ignore */ } }
+}
+
+// The user asked for the window (tray, dock): show it as soon as it has painted.
+function revealMainWindow() {
+  const win = mainWin || createMainWindow();
+  raisedForApproval = false; // theirs now — it stays open when the queue drains
+  if (mainPainted) presentWindow(win); else showWhenPainted = true;
+}
+
+function navigateTo(page) {
+  if (!PAGES.has(page)) return;
+  currentPage = page;
+  if (mainWin && mainLoaded) { try { mainWin.webContents.send("app:navigate", page); } catch { /* pulled on mount */ } }
+}
+
+// Tray → a page of the one window.
+function openPage(page) {
+  navigateTo(page);
+  revealMainWindow();
+}
+
+function hideMainWindow() {
+  const win = mainWin;
+  if (!win || win.isDestroyed()) return;
+  raisedForApproval = false;
+  try { win.setAlwaysOnTop(false); } catch { /* ignore */ }
+  win.hide();
+  if (app.dock) { try { app.dock.hide(); } catch { /* ignore */ } }
+  // Closing the window while a fill request is on screen declines it — exactly what
+  // closing the old prompt window did — so the agent hears "cancelled" now instead of
+  // waiting out the deadline. A headless-Keeper request is NOT answered by a close: it
+  // stays pending in the tray until approved, denied, resolved elsewhere or expired.
+  if (promptState && promptState.rendered) declineCurrentPrompt();
+}
+
+// A request is on screen: bring the window up over everything, as the prompt window did.
+function raiseForApproval() {
+  const win = mainWin;
+  if (!win || win.isDestroyed()) return;
+  if (!win.isVisible() || win.isMinimized()) raisedForApproval = true;
+  try { win.setAlwaysOnTop(true, "screen-saver"); } catch { /* ignore */ }
+  presentWindow(win);
+}
+
+// Nothing is waiting for the user any more: stop floating over other apps, and if a
+// request is what brought the window up, put it away again.
+function settleWindow() {
+  if (promptState || queue.length || pendingUnlocks.size) return;
+  const win = mainWin;
+  if (!win || win.isDestroyed()) return;
+  try { win.setAlwaysOnTop(false); } catch { /* ignore */ }
+  if (raisedForApproval) {
+    raisedForApproval = false;
+    win.hide();
+    if (app.dock) { try { app.dock.hide(); } catch { /* ignore */ } }
+  }
+}
+
+// What the sidebar footer, the Approvals badge and the in-app warnings show — the same
+// facts the tray menu carries, so the window never disagrees with the menu bar.
+function appStatus() {
+  let host = "";
+  try { host = serviceHost(); } catch { /* no config */ }
+  return {
+    connected,
+    host,
+    waiting: queue.length,
+    unlocks: pendingUnlocks.size,
+    outbox: outbox.size(),
+    promptFailure: lastPromptFailure ? { reason: lastPromptFailure.reason, at: lastPromptFailure.at } : null,
+    undelivered: lastUndelivered ? { why: lastUndelivered.why, at: lastUndelivered.at } : null,
+    vaultNeedsRepair: !!vaultNeedsRepair,
+    vaultLegacyKey: !!vaultLegacyKey,
+    version: app.getVersion(),
+  };
+}
+function pushAppStatus() {
+  if (mainWin && mainLoaded && !mainWin.isDestroyed()) {
+    try { mainWin.webContents.send("app:status", appStatus()); } catch { /* next update */ }
+  }
+}
+
+ipcMain.handle("app:state", (e) => {
+  if (!fromWindow(e, "app:state", mainWin)) return null;
+  return { page: currentPage, status: appStatus() };
+});
+// The user moved to another page in the sidebar. Remembered so a reload lands on it, and
+// it makes the window theirs: it no longer hides itself when the queue drains.
+ipcMain.on("app:page", (e, page) => {
+  if (!fromWindow(e, "app:page", mainWin)) return;
+  if (!PAGES.has(page)) return;
+  currentPage = page;
+  raisedForApproval = false;
+});
+// The in-app warnings ("approval UI failed", "an answer never arrived") are dismissed
+// from the window as well as from the tray.
+ipcMain.on("app:dismiss", (e, what) => {
+  if (!fromWindow(e, "app:dismiss", mainWin)) return;
+  if (what === "promptFailure") lastPromptFailure = null;
+  else if (what === "undelivered") lastUndelivered = null;
+  else return;
+  updateTray();
+});
+
+// ---------- Fill requests on screen ----------
+// The Approvals page is the ONLY surface a fill request can be answered from, so its
 // render is supervised (issue #3: the window opened but painted nothing, and the request
-// could never be approved). Three rules:
-//   1. the window stays hidden until the renderer confirms the request is on screen, so
-//      an empty frame is never shown;
-//   2. the payload is BOTH pushed (on did-finish-load) and pulled (keeper:pending-request),
+// could never be approved). Three rules, unchanged by the move to one window:
+//   1. a window that a request brings up stays hidden until the renderer confirms the
+//      request is on screen, so an empty frame is never shown;
+//   2. the payload is BOTH pushed (keeper:request) and pulled (keeper:pending-request),
 //      so no single missed event can leave the renderer with nothing to draw;
 //   3. if the request is not on screen within PROMPT_RENDER_TIMEOUT_MS, that is a named,
 //      visible failure and the requester is told the UI failed — never silence.
 const PROMPT_RENDER_TIMEOUT_MS = Number(process.env.KEEPER_RENDER_TIMEOUT_MS) || 15000;
-let promptState = null;        // { requestId, payload, loaded, rendered, timer } for the open prompt
+let promptState = null;        // { requestId, payload, loaded, rendered, timer, expired } — the request on screen
 let lastPromptFailure = null;  // { requestId, reason, at } — shown in the tray until dismissed
 
 function showNextPrompt() {
   updateTray(); // every caller has just changed the queue — keep its pending list truthful
-  if (promptWin || queue.length === 0) return;
+  if (promptState || app.isQuitting) return;
+  if (queue.length === 0) { settleWindow(); return; }
   const requestId = queue[0];
   const req = pending.get(requestId);
   if (!req) { queue.shift(); return showNextPrompt(); }
@@ -785,32 +1030,6 @@ function showNextPrompt() {
   const hasCardField = fields.some((f) => String((f && f.field) || "").toLowerCase().startsWith("card-"));
   let cardOpts = [];
   if (hasCardField) { try { cardOpts = cardOptions(loadCards(cardBaseUrl())); } catch {} }
-  const winHeight = Math.min(800, 260 + Math.max(1, fields.length) * 96 + (cardOpts.length ? 72 : 0));
-
-  promptWin = new BrowserWindow({
-    // Hidden until the renderer says the request is painted (keeper:prompt-rendered).
-    // Showing on creation is what turned a render failure into a blank approval window.
-    show: false,
-    width: 480,
-    height: winHeight,
-    resizable: true,
-    fullscreenable: false,
-    minimizable: false,
-    maximizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    title: "Remote Browser Keeper",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,          // renderer runs sandboxed; only the preload bridge is exposed
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  const win = promptWin;
   const payload = {
     request_id: req.request_id,
     session_id: req.session_id,
@@ -825,88 +1044,77 @@ function showNextPrompt() {
     host: hostFromUrl(req.url || ""), // normalized site for the "remember" option
   };
   promptState = { requestId, payload, loaded: false, rendered: false, timer: null };
-  promptWin.setAlwaysOnTop(true, "screen-saver");
-  // The prompt only ever shows local content. Deny any attempt to navigate away
-  // or open a new window (defense-in-depth on top of the renderer CSP), so no
-  // server/agent-supplied string can turn into a navigation or popup.
-  promptWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  promptWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  promptWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  promptWin.webContents.on("will-attach-webview", (e) => e.preventDefault());
-  // Push the payload the moment the document is loaded (the renderer also pulls it on
-  // mount — see keeper:pending-request). Not "ready-to-show": that fires on first paint,
-  // so a window that loads but never paints would get the request never at all.
-  promptWin.webContents.on("did-finish-load", () => {
-    if (!promptState || promptState.requestId !== requestId) return;
+  const win = mainWin || createMainWindow();
+  if (mainLoaded) {
     promptState.loaded = true;
     try { win.webContents.send("keeper:request", payload); } catch { /* fail-prompt below */ }
-  });
-  // Every way the renderer can fail to come up, named — so the cause is in the log
-  // instead of being guessed at from a blank window.
-  promptWin.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
-    if (isMainFrame) failPrompt(requestId, `renderer load failed (${code} ${desc}) ${url}`);
-  });
-  promptWin.webContents.on("preload-error", (_e, preloadPath, err) => {
-    failPrompt(requestId, `preload threw (${preloadPath}): ${(err && err.message) || err}`);
-  });
-  promptWin.webContents.on("render-process-gone", (_e, details) => {
-    failPrompt(requestId, `renderer process gone (${(details && details.reason) || "?"})`);
-  });
-  loadWindow(promptWin, "prompt");
+  }
   // Nothing on screen within the deadline => the approval UI is broken, not the user
-  // being slow (the user cannot even be slow yet — the window is still hidden).
+  // being slow (a window the request brought up is still hidden at this point).
   promptState.timer = setTimeout(() => {
     failPrompt(requestId, promptState && promptState.loaded
       ? "content loaded but never painted"
       : "content never finished loading");
   }, PROMPT_RENDER_TIMEOUT_MS);
-  promptWin.on("closed", () => {
-    if (promptState && promptState.requestId === requestId) {
-      clearTimeout(promptState.timer);
-      promptState = null;
-    }
-    // If closed without an explicit submit/cancel, treat as cancel.
-    if (pending.has(requestId)) {
-      const closed = pending.get(requestId);
-      recordHistory(closed, "cancelled");
-      sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true },
-        { expiresAt: closed._expires_at, req: closed });
-      pending.delete(requestId);
-    }
-    if (queue[0] === requestId) queue.shift();
-    if (promptWin === win) promptWin = null; // a later prompt may already own promptWin
-    showNextPrompt();
-  });
+}
+
+// The request at the head of the queue is no longer on screen (answered, dismissed,
+// expired, failed). Tells the renderer to drop it, unless it already did so itself.
+function endPrompt(requestId, { tellRenderer = true } = {}) {
+  if (!promptState || promptState.requestId !== requestId) return false;
+  clearTimeout(promptState.timer);
+  promptState = null;
+  if (tellRenderer && mainWin && mainLoaded && !mainWin.isDestroyed()) {
+    try { mainWin.webContents.send("keeper:request-gone", { request_id: requestId }); } catch { /* ignore */ }
+  }
+  return true;
+}
+
+// The request on screen is declined without a reason: the window was closed under it.
+function declineCurrentPrompt() {
+  if (!promptState) return;
+  const requestId = promptState.requestId;
+  clearExpiry(requestId);
+  if (pending.has(requestId)) {
+    const closed = pending.get(requestId);
+    recordHistory(closed, "cancelled");
+    sendAnswer({ type: "fill_response", request_id: requestId, cancelled: true },
+      { expiresAt: closed._expires_at, req: closed });
+    pending.delete(requestId);
+  }
+  if (queue[0] === requestId) queue.shift();
+  endPrompt(requestId);
+  showNextPrompt();
 }
 
 // The renderer confirms (after an actual paint) that the request is on screen. Only then
-// is the window shown, so the user never sees an empty approval window, and the render
+// is a hidden window shown, so the user never sees an empty approval page, and the render
 // watchdog stands down.
 ipcMain.on("keeper:prompt-rendered", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:prompt-rendered", promptWin)) return;
+  if (!fromWindow(e, "keeper:prompt-rendered", mainWin)) return;
   if (!promptState || promptState.requestId !== request_id) return;
   if (promptState.rendered) return;
   promptState.rendered = true;
   clearTimeout(promptState.timer);
   promptState.timer = null;
-  promptWin.show();
-  promptWin.focus();
+  currentPage = "approvals"; // the renderer switched to it to draw the request
+  raiseForApproval();
   try { shell.beep(); } catch { /* play the OS alert sound to announce the prompt */ }
 });
-// Pull side of the delivery: the prompt renderer asks for the request it must draw, so
-// it does not depend on having been listening when main pushed it.
+// Pull side of the delivery: the renderer asks for the request it must draw, so it does
+// not depend on having been listening when main pushed it.
 ipcMain.handle("keeper:pending-request", (e) => {
-  if (!fromWindow(e, "keeper:pending-request", promptWin)) return null;
+  if (!fromWindow(e, "keeper:pending-request", mainWin)) return null;
   if (!promptState) return null;
   return promptState.payload;
 });
 
-// A prompt that never made it onto the screen. Name the cause, make it visible (log +
+// A request that never made it onto the screen. Name the cause, make it visible (log +
 // tray + History), and tell the service the APPROVAL UI failed — a distinct outcome from
 // "the user did not answer", so an automation can stop instead of retrying a login into
 // an account lockout.
 function failPrompt(requestId, reason) {
-  // `expired` is not a render failure: the request ran out of time while the window was
+  // `expired` is not a render failure: the request ran out of time while the page was
   // still coming up, and expireRequest has already dealt with it (issue #12).
   if (!promptState || promptState.requestId !== requestId || promptState.rendered || promptState.expired) return;
   clearExpiry(requestId);
@@ -924,28 +1132,31 @@ function failPrompt(requestId, reason) {
     pending.delete(requestId);
   }
   if (queue[0] === requestId) queue.shift();
-  const w = promptWin;
-  promptWin = null;
-  clearTimeout(promptState.timer);
-  promptState = null;
-  if (w && !w.isDestroyed()) w.destroy(); // its "closed" handler is now a no-op (nothing pending)
+  const loaded = promptState.loaded;
+  endPrompt(requestId);
+  // A hidden window whose document never came up is thrown away, so the next request
+  // starts on a fresh one instead of inheriting whatever broke this one. A window the
+  // user can see keeps its page (the failure is named in the tray and in the window).
+  const w = mainWin;
+  if (w && !w.isDestroyed() && !w.isVisible() && !(loaded && mainPainted)) w.destroy();
   updateTray();
   showNextPrompt();
 }
 
 // Bring a queued request to the front: the tray lists everything awaiting approval, so a
-// window that failed (or was lost behind something) never means restarting the app.
+// page that failed (or a window lost behind something) never means restarting the app.
 function focusRequest(requestId) {
   if (!pending.has(requestId)) return;
-  if (promptWin) {
-    // One prompt at a time: surface the open one, and make this request the next in line.
+  if (promptState) {
+    // One request on screen at a time: surface it, and make this request the next in line.
     if (queue[0] !== requestId) {
       const i = queue.indexOf(requestId);
       if (i > 0) { queue.splice(i, 1); queue.splice(1, 0, requestId); }
     }
-    // Never force a not-yet-painted window on screen — that is the blank window again.
+    // Never force a not-yet-painted request on screen — that is the blank window again.
     // It appears by itself the moment it renders, or fails loudly (failPrompt).
-    if (promptState && promptState.rendered) { promptWin.show(); promptWin.focus(); }
+    if (promptState.rendered) { navigateTo("approvals"); raiseForApproval(); }
+    updateTray();
     return;
   }
   const i = queue.indexOf(requestId);
@@ -961,22 +1172,22 @@ function resolveRequest(requestId, payload) {
   sendAnswer({ type: "fill_response", request_id: requestId, ...payload }, { expiresAt: req._expires_at, req });
   pending.delete(requestId);
   if (queue[0] === requestId) queue.shift();
-  if (promptWin) { const w = promptWin; promptWin = null; w.close(); }
+  // The renderer cleared the request itself when the user answered it.
+  endPrompt(requestId, { tellRenderer: false });
   showNextPrompt();
 }
 
 // Drop a request that was resolved elsewhere (another keeper answered it, or it timed
 // out). Unlike resolveRequest, we do NOT send a fill_response — the server is no longer
-// waiting on us. Removing it from `pending` first stops the prompt's closed-handler from
-// firing a spurious cancel.
+// waiting on us. Removing it from `pending` first stops a window close from firing a
+// spurious cancel.
 function dismissRequest(requestId) {
   if (!pending.has(requestId) && queue.indexOf(requestId) === -1) return; // not ours / already gone
-  const wasCurrent = queue[0] === requestId;
   clearExpiry(requestId);
   pending.delete(requestId);
   const i = queue.indexOf(requestId);
   if (i !== -1) queue.splice(i, 1);
-  if (wasCurrent && promptWin) { const w = promptWin; promptWin = null; w.close(); }
+  endPrompt(requestId);
   showNextPrompt();
 }
 
@@ -985,7 +1196,7 @@ function dismissRequest(requestId) {
 // it `timeout`. The Keeper follows the SAME absolute moment (deadline.js reads it off the
 // frame; there is no countdown when the frame doesn't carry one), so a prompt cannot
 // outlive the request it belongs to and sit there looking answerable.
-const EXPIRED_LINGER_MS = 6000; // an expired prompt says why, then closes itself
+const EXPIRED_LINGER_MS = 6000; // an expired prompt says why, then goes away by itself
 const expiryTimers = new Map(); // request_id -> timeout
 
 function armExpiry(req) {
@@ -1004,9 +1215,9 @@ function clearExpiry(requestId) {
 
 // The deadline passed. Like dismissRequest we send NO fill_response — the service already
 // resolved this request as `timeout` and is not listening. What is different is that the
-// user may be looking at the open prompt: it is told it expired (the renderer's countdown
-// hits zero at the same moment) and closes itself a few seconds later, rather than staying
-// up as a prompt that silently does nothing when used.
+// user may be looking at it: the page is told it expired (the renderer's countdown hits
+// zero at the same moment) and drops it a few seconds later, rather than keeping up a
+// prompt that silently does nothing when used.
 function expireRequest(requestId) {
   clearExpiry(requestId);
   const req = pending.get(requestId);
@@ -1016,16 +1227,17 @@ function expireRequest(requestId) {
   pending.delete(requestId);
   const i = queue.indexOf(requestId);
   if (i !== -1) queue.splice(i, 1);
-  const current = promptState && promptState.requestId === requestId && promptWin && !promptWin.isDestroyed();
+  const current = promptState && promptState.requestId === requestId;
   if (!current) { showNextPrompt(); return; } // showNextPrompt refreshes the tray
-  // Stand the render watchdog down: a window whose request expired before it painted did
-  // not fail to render, and must not be reported as a broken approval UI.
+  // Stand the render watchdog down: a request that expired before it painted did not
+  // fail to render, and must not be reported as a broken approval UI.
   promptState.expired = true;
   if (promptState.timer) { clearTimeout(promptState.timer); promptState.timer = null; }
-  const w = promptWin;
-  try { w.webContents.send("keeper:expired", { request_id: requestId }); } catch { /* it is closing anyway */ }
-  setTimeout(() => { if (!w.isDestroyed()) w.close(); }, EXPIRED_LINGER_MS);
-  updateTray(); // it is out of the queue already; the window is only saying goodbye
+  if (mainWin && mainLoaded) {
+    try { mainWin.webContents.send("keeper:expired", { request_id: requestId }); } catch { /* it is going anyway */ }
+  }
+  setTimeout(() => { if (endPrompt(requestId)) showNextPrompt(); }, EXPIRED_LINGER_MS);
+  updateTray(); // it is out of the queue already; the page is only saying goodbye
 }
 
 // The renderer's countdown reached zero. It reads the wall clock, so it notices a deadline
@@ -1033,7 +1245,7 @@ function expireRequest(requestId) {
 // does not tick through suspend). Verified against main's own copy of the deadline, so the
 // renderer can never retire a request early.
 ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:prompt-expired", promptWin)) return;
+  if (!fromWindow(e, "keeper:prompt-expired", mainWin)) return;
   if (!promptState || promptState.requestId !== request_id) return;
   const req = pending.get(request_id);
   if (!req || req._expires_at == null || Date.now() < req._expires_at) return;
@@ -1041,7 +1253,7 @@ ipcMain.on("keeper:prompt-expired", (e, { request_id } = {}) => {
 });
 
 ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
-  if (!fromWindow(e, "keeper:submit", promptWin)) return;
+  if (!fromWindow(e, "keeper:submit", mainWin)) return;
   resolveRequest(request_id, { values: Array.isArray(values) ? values : [] });
 });
 // Decline. The optional `reason` is the user's short note about WHY (issue #11): it rides
@@ -1050,15 +1262,16 @@ ipcMain.on("keeper:submit", (e, { request_id, values } = {}) => {
 // is the authority on what goes on the wire — and omitted entirely when there is none, so
 // a plain one-tap Cancel sends byte-for-byte what it always did.
 ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
-  if (!fromWindow(e, "keeper:cancel", promptWin)) return;
+  if (!fromWindow(e, "keeper:cancel", mainWin)) return;
   // An expired request is already out of `pending`: there is nothing left to answer, but
-  // the window must still close when the user dismisses it — resolveRequest would no-op
-  // and leave a window nobody can get rid of. This does NOT swallow a decline reason: the
-  // guard only fires when the request is already gone (expired / answered / dismissed
-  // elsewhere), and resolveRequest's own `pending` check would have dropped it anyway. A
-  // live request still falls through to the full reason path below.
+  // the page must still let go of it when the user dismisses it — resolveRequest would
+  // no-op and leave the queue stuck behind a prompt nobody can get rid of. This does NOT
+  // swallow a decline reason: the guard only fires when the request is already gone
+  // (expired / answered / dismissed elsewhere), and resolveRequest's own `pending` check
+  // would have dropped it anyway. A live request still falls through to the full reason
+  // path below.
   if (!pending.has(request_id)) {
-    if (promptWin && !promptWin.isDestroyed()) promptWin.close(); // the guard above proved it is the sender
+    if (endPrompt(request_id, { tellRenderer: false })) showNextPrompt();
     return;
   }
   const note = normalizeDeclineReason(reason);
@@ -1068,7 +1281,7 @@ ipcMain.on("keeper:cancel", (e, { request_id, reason } = {}) => {
 // (when the user picks a card to pre-fill). Values stay local; the user reviews
 // and sends. Returns [{selector,value}].
 ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
-  if (!fromWindow(e, "keeper:card-values", promptWin)) return [];
+  if (!fromWindow(e, "keeper:card-values", mainWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1082,7 +1295,7 @@ ipcMain.handle("keeper:card-values", (e, { request_id, card_id } = {}) => {
 // "Auto-fill on this site next time": approve the request's domain for the chosen
 // card and persist it. Future requests from that domain fill silently.
 ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) => {
-  if (!fromWindow(e, "keeper:remember-card-domain", promptWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:remember-card-domain", mainWin)) return { ok: false };
   try {
     const req = pending.get(request_id);
     if (!req) return { ok: false };
@@ -1099,7 +1312,7 @@ ipcMain.handle("keeper:remember-card-domain", (e, { request_id, card_id } = {}) 
 
 // "Allow for all sites": approve the chosen card for every site (wildcard).
 ipcMain.handle("keeper:remember-card-all-sites", (e, { card_id } = {}) => {
-  if (!fromWindow(e, "keeper:remember-card-all-sites", promptWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:remember-card-all-sites", mainWin)) return { ok: false };
   try {
     const base = cardBaseUrl();
     const store = loadCards(base);
@@ -1110,43 +1323,13 @@ ipcMain.handle("keeper:remember-card-all-sites", (e, { card_id } = {}) => {
   }
 });
 
-// ---------- History window ----------
-function openHistoryWindow() {
-  if (historyWin) { historyWin.show(); historyWin.focus(); return; }
-  historyWin = new BrowserWindow({
-    width: 540,
-    height: 660,
-    resizable: true,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — History",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "history-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  historyWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  historyWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  historyWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(historyWin, "history");
-  historyWin.once("ready-to-show", () => {
-    void sendHistory();
-    historyWin.show();
-    historyWin.focus();
-  });
-  historyWin.on("closed", () => { historyWin = null; });
-}
-
+// ---------- History page ----------
 function pushHistory(payload) {
-  if (historyWin && !historyWin.isDestroyed()) historyWin.webContents.send("history:data", payload);
+  if (mainWin && mainLoaded && !mainWin.isDestroyed()) mainWin.webContents.send("history:data", payload);
 }
 
 // Paint the local log at once, then repaint with the union as soon as the service's
-// list lands (or fails). The window therefore never waits on the network: offline it
+// list lands (or fails). The page therefore never waits on the network: offline it
 // just stays local-only, with the reason shown. A newer refresh cancels an older one's
 // second paint so a slow response can't overwrite a fresher list.
 let historySeq = 0;
@@ -1156,7 +1339,7 @@ async function sendHistory() {
   let r;
   try { r = await fetchServerHistory(apiConn(loadConfig())); }
   catch (e) { r = { ok: false, requests: [], error: e.message }; } // loadConfig threw
-  if (seq !== historySeq || !historyWin) return;
+  if (seq !== historySeq || !mainWin) return;
   pushHistory({
     items: mergeHistory(readHistory(), r.requests),
     server: r.ok ? { state: "ok", count: r.requests.length } : { state: "error", error: r.error },
@@ -1164,14 +1347,14 @@ async function sendHistory() {
 }
 
 ipcMain.on("history:refresh", (e) => {
-  if (!fromWindow(e, "history:refresh", historyWin)) return;
+  if (!fromWindow(e, "history:refresh", mainWin)) return;
   void sendHistory();
 });
 // The proof image, from wherever it survives: this device's JPEG first (no network),
 // else the service's copy — a request answered on another device, or one whose local
 // file was evicted, still shows its screenshot. null = neither side has it.
 ipcMain.handle("history:screenshot", async (e, id) => {
-  if (!fromWindow(e, "history:screenshot", historyWin)) return null;
+  if (!fromWindow(e, "history:screenshot", mainWin)) return null;
   const sid = safeId(id);
   if (!sid) return null;
   try {
@@ -1180,75 +1363,22 @@ ipcMain.handle("history:screenshot", async (e, id) => {
   try { return await fetchServerScreenshot(apiConn(loadConfig()), sid); } catch { return null; }
 });
 
-// ---------- Cards window (manage saved cards for auto-fill) ----------
-let cardsWin = null;
-function openCardsWindow() {
-  if (cardsWin) { cardsWin.show(); cardsWin.focus(); return; }
-  cardsWin = new BrowserWindow({
-    width: 560,
-    height: 720,
-    resizable: true,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Cards",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "cards-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  cardsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  cardsWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  cardsWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(cardsWin, "cards");
-  cardsWin.once("ready-to-show", () => { cardsWin.show(); cardsWin.focus(); });
-  cardsWin.on("closed", () => { cardsWin = null; });
-}
-
-let savedFieldsWin = null;
-function openSavedFieldsWindow() {
-  if (savedFieldsWin) { savedFieldsWin.show(); savedFieldsWin.focus(); return; }
-  savedFieldsWin = new BrowserWindow({
-    width: 560,
-    height: 640,
-    resizable: true,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Saved fields",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "savedfields-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  savedFieldsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  savedFieldsWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  savedFieldsWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(savedFieldsWin, "savedfields");
-  savedFieldsWin.once("ready-to-show", () => { savedFieldsWin.show(); savedFieldsWin.focus(); });
-  savedFieldsWin.on("closed", () => { savedFieldsWin = null; });
-}
+// ---------- Saved fields page ----------
 ipcMain.handle("fields:list", (e) => {
-  if (!fromWindow(e, "fields:list", savedFieldsWin)) return [];
+  if (!fromWindow(e, "fields:list", mainWin)) return [];
   try { return listSaved(loadConfig().baseUrl); } catch { return []; }
 });
 // Reveal a single saved value on demand (e.g. to read a generated password you never
 // saw). The value stays local — returned only to this window's renderer, never the AI.
 ipcMain.handle("fields:reveal", (e, { session, host, selector } = {}) => {
-  if (!fromWindow(e, "fields:reveal", savedFieldsWin)) return { ok: false, value: null };
+  if (!fromWindow(e, "fields:reveal", mainWin)) return { ok: false, value: null };
   try {
     const s = getSaved(loadConfig().baseUrl, session, host, selector);
     return { ok: true, value: s ? s.value : null };
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle("fields:forget", (e, { session, host, selector } = {}) => {
-  if (!fromWindow(e, "fields:forget", savedFieldsWin)) return { ok: false };
+  if (!fromWindow(e, "fields:forget", mainWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const wasVault = getSaved(baseUrl, session, host, selector)?.scope === "vault";
@@ -1258,64 +1388,10 @@ ipcMain.handle("fields:forget", (e, { session, host, selector } = {}) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle("fields:forget-all", (e) => {
-  if (!fromWindow(e, "fields:forget-all", savedFieldsWin)) return { ok: false };
+  if (!fromWindow(e, "fields:forget-all", mainWin)) return { ok: false };
   try { forgetAllFields(loadConfig().baseUrl); void syncVaultNow(); return { ok: true }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
-
-let pairWin = null;
-function openPairWindow() {
-  if (pairWin) { pairWin.show(); pairWin.focus(); return; }
-  pairWin = new BrowserWindow({
-    width: 380,
-    height: 520,
-    resizable: false,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Pair phone",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "pair-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  pairWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  pairWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  pairWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(pairWin, "pair");
-  pairWin.once("ready-to-show", () => { pairWin.show(); pairWin.focus(); });
-  pairWin.on("closed", () => { pairWin = null; });
-}
-
-let vaultPwWin = null;
-function openVaultPwWindow() {
-  if (vaultPwWin) { vaultPwWin.show(); vaultPwWin.focus(); return; }
-  vaultPwWin = new BrowserWindow({
-    width: 400,
-    height: 360,
-    resizable: false,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Vault password",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "vaultpw-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  vaultPwWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  vaultPwWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  vaultPwWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(vaultPwWin, "vaultpw");
-  vaultPwWin.once("ready-to-show", () => { vaultPwWin.show(); vaultPwWin.focus(); });
-  vaultPwWin.on("closed", () => { vaultPwWin = null; });
-}
 
 // ---------- Headless Keepers (rbkeeper-unlock-v1 — headless.js, docs/rbkeeper-unlock-v1.md) ----------
 // A headless Keeper (a daemon on a server) holds no vault key at rest. On every boot it
@@ -1355,22 +1431,21 @@ async function handleUnlockRequest(msg) {
   pendingUnlocks.set(v.requestId, { ...v, receivedAt: now, expiresAt: now + UNLOCK_TIMEOUT_MS, timer, busy: false });
   console.log(unlockLogLine("received", { request_id: v.requestId, headless_id: v.headlessId, boot_id: v.bootId, name: v.name }));
   updateTray();
-  openUnlockWindow();
+  showUnlock();
 }
 
-// Drop a request (answered, resolved elsewhere, or expired) and move the window on.
+// Drop a request (answered, resolved elsewhere, or expired) and move the page on.
 function finishUnlock(requestId) {
   const u = pendingUnlocks.get(requestId);
   if (!u) return;
   clearTimeout(u.timer);
   pendingUnlocks.delete(requestId);
   updateTray();
-  if (!unlockWin) return;
-  if (pendingUnlocks.size) unlockWin.webContents.send("unlock:changed");
-  else unlockWin.close();
+  if (mainWin && mainLoaded) { try { mainWin.webContents.send("unlock:changed"); } catch { /* ignore */ } }
+  settleWindow();
 }
 
-// What the window shows: the oldest pending request. Identifiers, the pin's name and
+// What the Approvals page shows: the oldest pending request. Identifiers, the pin's name and
 // the comparison code only — nothing secret is in a request.
 function currentUnlock() {
   const u = pendingUnlocks.values().next().value;
@@ -1438,87 +1513,37 @@ function denyUnlock(requestId) {
   return { ok: true };
 }
 
-let unlockWin = null;
-function openUnlockWindow() {
-  if (unlockWin) { unlockWin.webContents.send("unlock:changed"); unlockWin.show(); unlockWin.focus(); return; }
+// Show the request on the Approvals page, bringing the window up over everything the way
+// the separate approval window used to. Not render-supervised like a fill request: the
+// unlock request is pulled (unlock:get) and an unanswered one simply expires.
+function showUnlock() {
   if (!pendingUnlocks.size) return;
-  unlockWin = new BrowserWindow({
-    show: false,
-    width: 440,
-    height: 400,
-    resizable: false,
-    fullscreenable: false,
-    minimizable: false,
-    maximizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    title: "Remote Browser Keeper — Headless Keeper restarted",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "unlock-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  unlockWin.setAlwaysOnTop(true, "screen-saver");
-  unlockWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  unlockWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  unlockWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(unlockWin, "unlock");
-  unlockWin.once("ready-to-show", () => { unlockWin.show(); unlockWin.focus(); });
-  // Closing the window is not an answer: the request stays pending (tray) until it is
-  // approved, denied, resolved elsewhere or expires.
-  unlockWin.on("closed", () => { unlockWin = null; });
+  const win = mainWin || createMainWindow();
+  navigateTo("approvals");
+  if (mainLoaded) { try { win.webContents.send("unlock:changed"); } catch { /* pulled on mount */ } }
+  if (!win.isVisible()) raisedForApproval = true;
+  try { win.setAlwaysOnTop(true, "screen-saver"); } catch { /* ignore */ }
+  if (mainPainted) presentWindow(win); else showWhenPainted = true;
 }
 
 ipcMain.handle("unlock:get", (e) => {
-  if (!fromWindow(e, "unlock:get", unlockWin)) return null;
+  if (!fromWindow(e, "unlock:get", mainWin)) return null;
   return currentUnlock();
 });
 // Both answers name the request the user was looking at, so a request that arrived
 // meanwhile can't be approved in its place.
 ipcMain.handle("unlock:approve", async (e, { requestId } = {}) => {
-  if (!fromWindow(e, "unlock:approve", unlockWin)) return { ok: false };
+  if (!fromWindow(e, "unlock:approve", mainWin)) return { ok: false };
   return approveUnlock(String(requestId || ""));
 });
 ipcMain.handle("unlock:deny", (e, { requestId } = {}) => {
-  if (!fromWindow(e, "unlock:deny", unlockWin)) return { ok: false };
+  if (!fromWindow(e, "unlock:deny", mainWin)) return { ok: false };
   return denyUnlock(String(requestId || ""));
 });
 
-// Pinning: the owner pastes the public key the daemon printed and names it. The pin goes
-// into the vault (synced to every paired device), then the daemon is registered with the
-// service so its connection is accepted.
-let headlessWin = null;
-function openHeadlessWindow() {
-  if (headlessWin) { headlessWin.show(); headlessWin.focus(); return; }
-  headlessWin = new BrowserWindow({
-    width: 480,
-    height: 560,
-    resizable: true,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Headless Keepers",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "headless-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  headlessWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  headlessWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  headlessWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(headlessWin, "headless");
-  headlessWin.once("ready-to-show", () => { headlessWin.show(); headlessWin.focus(); });
-  headlessWin.on("closed", () => { headlessWin = null; });
-}
-
+// Pinning (the Headless Keepers page): the owner pastes the public key the daemon printed
+// and names it. The pin goes into the vault (synced to every paired device), then the
+// daemon is registered with the service so its connection is accepted.
 // The pins are only known after a vault sync; changing them before would be blind.
 async function ensurePinsLoaded() {
   if (!pinsLoaded) await syncVaultNow();
@@ -1526,7 +1551,7 @@ async function ensurePinsLoaded() {
 }
 
 ipcMain.handle("headless:list", async (e) => {
-  if (!fromWindow(e, "headless:list", headlessWin)) return { ok: false };
+  if (!fromWindow(e, "headless:list", mainWin)) return { ok: false };
   if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet — check the connection and vault password." };
   const keepers = Object.entries(activePins(headlessPins))
     .map(([id, p]) => {
@@ -1540,7 +1565,7 @@ ipcMain.handle("headless:list", async (e) => {
 // The fingerprint of a pasted key, for the owner to compare with `rb-keeperd enroll`
 // before adding it (spec §3 step 2). Public data only.
 ipcMain.handle("headless:preview", async (e, { publicKey } = {}) => {
-  if (!fromWindow(e, "headless:preview", headlessWin)) return { ok: false };
+  if (!fromWindow(e, "headless:preview", mainWin)) return { ok: false };
   const key = parsePublicKey(publicKey);
   if (!key) return { ok: false, error: "That isn't a headless Keeper public key (base64 of 32 bytes)." };
   return { ok: true, id: key.id, fingerprint: key.fingerprint };
@@ -1550,7 +1575,7 @@ ipcMain.handle("headless:preview", async (e, { publicKey } = {}) => {
 // match ours), then pin the key in the vault and sync. The renderer only calls this after
 // the owner confirmed the fingerprint.
 ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
-  if (!fromWindow(e, "headless:add", headlessWin)) return { ok: false };
+  if (!fromWindow(e, "headless:add", mainWin)) return { ok: false };
   const nm = String(name || "").trim();
   if (!isValidName(nm)) return { ok: false, error: "Name: 1–32 letters, digits, '.', '_' or '-'." };
   const key = parsePublicKey(publicKey);
@@ -1582,7 +1607,7 @@ ipcMain.handle("headless:add", async (e, { name, publicKey } = {}) => {
 });
 
 ipcMain.handle("headless:remove", async (e, { id } = {}) => {
-  if (!fromWindow(e, "headless:remove", headlessWin)) return { ok: false };
+  if (!fromWindow(e, "headless:remove", mainWin)) return { ok: false };
   if (!(await ensurePinsLoaded())) return { ok: false, error: "The vault hasn't synced yet." };
   const hid = String(id || "");
   if (!activePins(headlessPins)[hid]) return { ok: false, error: "Not pinned." };
@@ -1595,40 +1620,14 @@ ipcMain.handle("headless:remove", async (e, { id } = {}) => {
   return synced ? { ok: true } : { ok: false, error: "Unpinned here and at the service, but the vault sync failed; it is retried with the next sync." };
 });
 
-let settingsWin = null;
-function openSettingsWindow() {
-  if (settingsWin) { settingsWin.show(); settingsWin.focus(); return; }
-  settingsWin = new BrowserWindow({
-    width: 420,
-    height: 500, // fits the "This device" panel above the preferences without scrolling
-    resizable: false,
-    fullscreenable: false,
-    title: "Remote Browser Keeper — Settings",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "settings-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  settingsWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  settingsWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  settingsWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(settingsWin, "settings");
-  settingsWin.once("ready-to-show", () => { settingsWin.show(); settingsWin.focus(); });
-  settingsWin.on("closed", () => { settingsWin = null; });
-}
 // Per-device Keeper preferences (see settings.js). Non-secret; local-only.
 ipcMain.handle("keeper:get-settings", (e) => {
-  if (!fromWindow(e, "keeper:get-settings", settingsWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:get-settings", mainWin)) return { ok: false };
   try { return { ok: true, settings: loadSettings(loadConfig().baseUrl) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle("keeper:set-settings", (e, patch = {}) => {
-  if (!fromWindow(e, "keeper:set-settings", settingsWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:set-settings", mainWin)) return { ok: false };
   try { return { ok: true, settings: saveSettings(loadConfig().baseUrl, patch) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
@@ -1636,8 +1635,9 @@ ipcMain.handle("keeper:set-settings", (e, patch = {}) => {
 // returned image — it is never sent to the renderer as text.
 ipcMain.handle("pair:qr", async (e) => {
   // The single highest-value channel in the app: the image it returns carries the API key,
-  // the session secret AND the vault password. Only the Pair window may ever ask.
-  if (!fromWindow(e, "pair:qr", pairWin)) return { error: "Not available." };
+  // the session secret AND the vault password. Only the main window's own top-level
+  // document may ever ask (the Pair phone page).
+  if (!fromWindow(e, "pair:qr", mainWin)) return { error: "Not available." };
   try {
     const { baseUrl, apiKey } = loadConfig();
     if (!apiKey) return { error: "No API key configured for this Keeper." };
@@ -1661,9 +1661,9 @@ ipcMain.handle("pair:qr", async (e) => {
 // Vault key status for the UI: whether a key is held, whether it's a custom (user)
 // password, and whether this device is out of sync (needs re-pair).
 ipcMain.handle("keeper:vault-status", (e) => {
-  // Two windows ask this one: the prompt (to default a generated password to the vault)
-  // and the vault-password window.
-  if (!fromWindow(e, "keeper:vault-status", promptWin, vaultPwWin)) return { ok: false };
+  // Two pages ask this one: Approvals (to default a generated password to the vault)
+  // and Vault password.
+  if (!fromWindow(e, "keeper:vault-status", mainWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
     const k = loadVaultKey(baseUrl);
@@ -1671,11 +1671,11 @@ ipcMain.handle("keeper:vault-status", (e) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 
-// The same identity + vault state we report to the service, for the Settings window — so
+// The same identity + vault state we report to the service, for the Settings page — so
 // "what is this device on?" is answerable without asking the service. Inert metadata: no
 // password, no key, and (per vaultKeyReport) no secret_id for a legacy v1 key.
 ipcMain.handle("keeper:device-info", (e) => {
-  if (!fromWindow(e, "keeper:device-info", settingsWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:device-info", mainWin)) return { ok: false };
   try {
     const report = deviceReport();
     if (!report.device) return { ok: false, error: "device report unavailable" };
@@ -1701,7 +1701,7 @@ ipcMain.handle("keeper:device-info", (e) => {
 // key, re-encrypts it under the new password (pbkdf2), and re-uploads — so no data is
 // lost. Other paired devices then see a secret_id mismatch and must re-pair to resync.
 ipcMain.handle("keeper:set-vault-password", async (e, { password } = {}) => {
-  if (!fromWindow(e, "keeper:set-vault-password", vaultPwWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:set-vault-password", mainWin)) return { ok: false };
   try {
     const cfg = loadConfig();
     const conn = apiConn(cfg);
@@ -1728,15 +1728,15 @@ ipcMain.handle("keeper:set-vault-password", async (e, { password } = {}) => {
 });
 // Card numbers and CVVs — the Cards window and nothing else.
 ipcMain.handle("cards:load", (e) => {
-  if (!fromWindow(e, "cards:load", cardsWin)) return {}; // an empty store is `{}` — see cards.js `_store`
+  if (!fromWindow(e, "cards:load", mainWin)) return {}; // an empty store is `{}` — see cards.js `_store`
   return loadCards(cardBaseUrl());
 });
 ipcMain.handle("cards:storage-info", (e) => {
-  if (!fromWindow(e, "cards:storage-info", cardsWin)) return { encrypted: false, platform: process.platform };
+  if (!fromWindow(e, "cards:storage-info", mainWin)) return { encrypted: false, platform: process.platform };
   return { encrypted: secureStorageAvailable(), platform: process.platform };
 });
 ipcMain.handle("cards:save", (e, store) => {
-  if (!fromWindow(e, "cards:save", cardsWin)) return { ok: false };
+  if (!fromWindow(e, "cards:save", mainWin)) return { ok: false };
   try {
     if (!store || typeof store !== "object") throw new Error("invalid store");
     saveCards(cardBaseUrl(), store);
@@ -1747,52 +1747,6 @@ ipcMain.handle("cards:save", (e, store) => {
   }
 });
 
-// ---------- Image viewer (full / natural size) ----------
-let imageWin = null;
-function openImageWindow(dataUrl) {
-  if (typeof dataUrl !== "string" || !/^data:image\//.test(dataUrl)) return;
-  if (imageWin) {
-    imageWin.webContents.send("image:data", dataUrl);
-    imageWin.show();
-    imageWin.focus();
-    return;
-  }
-  imageWin = new BrowserWindow({
-    width: 820,
-    height: 640,
-    resizable: true,
-    title: "Remote Browser Keeper — Screenshot",
-    backgroundColor: "#070A12",
-    webPreferences: {
-      preload: path.join(__dirname, "image-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: false,
-    },
-  });
-  imageWin.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  imageWin.webContents.on("will-navigate", (e) => e.preventDefault());
-  imageWin.webContents.on("will-redirect", (e) => e.preventDefault());
-  loadWindow(imageWin, "image");
-  imageWin.once("ready-to-show", () => {
-    imageWin.webContents.send("image:data", dataUrl);
-    imageWin.show();
-    imageWin.focus();
-  });
-  imageWin.on("closed", () => { imageWin = null; });
-}
-// The prompt renderer reports its content height; fit the window to it (keep the
-// width, cap to the screen) so there's no empty space or clipped content.
-ipcMain.on("keeper:resize", (e, height) => {
-  if (!fromWindow(e, "keeper:resize", promptWin)) return;
-  if (!Number.isFinite(height) || height < 1) return;
-  const area = screen.getPrimaryDisplay().workAreaSize;
-  const [w] = promptWin.getContentSize();
-  const ch = Math.max(160, Math.min(Math.round(height), area.height - 80));
-  promptWin.setContentSize(w, ch);
-});
 // Unattended password generation: when EVERY field of a request is a `generate` field,
 // the Keeper creates each value itself (genpassword.js policy), fills them, and saves them
 // — no prompt. The generated password is never shown to the user, so it's saved to the
@@ -1876,7 +1830,7 @@ function tryAutofillFields(req) {
 // fields (so the prompt prefills them), and save the submitted values per scope.
 // One-time codes are neither prefilled nor saved (onetimecode.js).
 ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
-  if (!fromWindow(e, "keeper:saved-values", promptWin)) return [];
+  if (!fromWindow(e, "keeper:saved-values", mainWin)) return [];
   try {
     const req = pending.get(request_id);
     if (!req) return [];
@@ -1894,7 +1848,7 @@ ipcMain.handle("keeper:saved-values", (e, { request_id } = {}) => {
   }
 });
 ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {}) => {
-  if (!fromWindow(e, "keeper:save-fields", promptWin)) return { ok: false };
+  if (!fromWindow(e, "keeper:save-fields", mainWin)) return { ok: false };
   try {
     if (!Array.isArray(values) || !["session", "forever", "vault", "forget"].includes(scope)) return { ok: false };
     const req = pending.get(request_id);
@@ -1920,30 +1874,13 @@ ipcMain.handle("keeper:save-fields", (e, { request_id, values, scope, auto } = {
     return { ok: false, error: err.message };
   }
 });
-// Both the prompt and History offer "tap the proof image to enlarge".
-ipcMain.on("keeper:view-image", (e, dataUrl) => {
-  if (!fromWindow(e, "keeper:view-image", promptWin, historyWin)) return;
-  openImageWindow(dataUrl);
-});
-// The viewer reports the image's natural size; fit the window to it (capped to
-// the screen work area) so the user sees it at normal size.
-ipcMain.on("image:sized", (e, w, h) => {
-  if (!fromWindow(e, "image:sized", imageWin)) return;
-  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
-  const area = screen.getPrimaryDisplay().workAreaSize;
-  const cw = Math.max(320, Math.min(Math.round(w) + 32, area.width - 80));
-  const ch = Math.max(240, Math.min(Math.round(h) + 32, area.height - 120));
-  imageWin.setContentSize(cw, ch);
-  imageWin.center();
-});
-
 // ---------- Tray ----------
 function serviceHost() {
   try { return new URL(loadConfig().baseUrl).host; } catch { return loadConfig().baseUrl; }
 }
 
 // Requests awaiting the user, straight in the tray menu: a second way to reach a pending
-// approval that doesn't depend on the prompt window being on screen (or having rendered).
+// approval that doesn't depend on the Approvals page being on screen (or having rendered).
 function pendingMenuItems() {
   const items = [];
   for (const id of queue) {
@@ -1957,12 +1894,13 @@ function pendingMenuItems() {
 }
 
 function updateTray() {
+  pushAppStatus(); // the window's footer / badges / warnings follow the tray
   if (!tray) return;
   const host = serviceHost();
   const state = connected ? "connected" : "reconnecting…";
   tray.setToolTip(`Remote Browser Keeper — ${state} · ${host}`);
   // A render failure is announced in the menu bar itself, since the surface that would
-  // normally tell the user (the prompt window) is the thing that just failed.
+  // normally tell the user (the Approvals page) is the thing that just failed.
   if (process.platform === "darwin") tray.setTitle(lastPromptFailure || lastUndelivered ? "⚠︎" : trayFallbackTitle);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `Service: ${host}`, enabled: false },
@@ -1987,20 +1925,23 @@ function updateTray() {
     ...pendingMenuItems(),
     ...(pendingUnlocks.size ? [{
       label: `🔓 Headless Keeper waiting for approval (${pendingUnlocks.size})…`,
-      click: openUnlockWindow,
+      click: showUnlock,
     }, { type: "separator" }] : []),
-    { label: "Cards…", click: openCardsWindow },
-    { label: "Saved fields…", click: openSavedFieldsWindow },
-    { label: "History…", click: openHistoryWindow },
+    // Every entry below opens the ONE window on that page (issue #28).
+    { label: "Open Remote Browser Keeper", click: revealMainWindow },
     { type: "separator" },
-    { label: "Pair phone…", click: openPairWindow },
-    { label: "Set vault password…", click: openVaultPwWindow },
-    { label: "Headless Keepers…", click: openHeadlessWindow },
-    { label: "Settings…", click: openSettingsWindow },
+    { label: "Cards…", click: () => openPage("cards") },
+    { label: "Saved fields…", click: () => openPage("savedfields") },
+    { label: "History…", click: () => openPage("history") },
+    { type: "separator" },
+    { label: "Pair phone…", click: () => openPage("pair") },
+    { label: "Set vault password…", click: () => openPage("vaultpw") },
+    { label: "Headless Keepers…", click: () => openPage("headless") },
+    { label: "Settings…", click: () => openPage("settings") },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     // A device left on the v1 key model is a real exposure (v1's stored id IS the key),
     // so name it in the menu bar. Setting a vault password re-encrypts onto v2.
-    ...(vaultLegacyKey ? [{ label: "⚠︎ Vault: legacy v1 key — set a vault password to migrate", click: openVaultPwWindow }] : []),
+    ...(vaultLegacyKey ? [{ label: "⚠︎ Vault: legacy v1 key — set a vault password to migrate", click: () => openPage("vaultpw") }] : []),
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
   ]));
@@ -2019,7 +1960,7 @@ function createTray() {
   updateTray();
 }
 
-// Exclude EVERY Keeper window from screen capture: screenshots, screen recording, screen
+// Exclude the Keeper window (and any window Electron ever creates) from screen capture: screenshots, screen recording, screen
 // sharing, and window-content/thumbnail readers (macOS AltTab, Mission Control previews)
 // see the window as blank. Keeps secrets on screen — entered passwords, revealed values,
 // card numbers, the pair QR (which carries the token + vault password) — from leaking to
@@ -2041,9 +1982,11 @@ app.on("browser-window-created", (_e, win) => {
   try { win.setContentProtection(true); } catch { /* ignore where unsupported */ }
 });
 
-// ---------- App lifecycle (tray-only; no window until a request) ----------
+// ---------- App lifecycle (tray app with one window, shown on demand) ----------
 app.whenReady().then(() => {
-  if (app.dock) app.dock.hide(); // no dock icon; live in the tray/menu bar
+  // No dock icon until the window is open: the Keeper lives in the tray/menu bar, and
+  // presentWindow / hideMainWindow show and hide the dock icon with the window.
+  if (app.dock) app.dock.hide();
   createTray();
   connect();
 
@@ -2065,4 +2008,6 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", (e) => { e?.preventDefault?.(); /* stay alive in tray */ });
+// macOS: clicking the dock icon (shown while the window is open) brings the window back.
+app.on("activate", () => { if (app.isReady()) revealMainWindow(); });
 app.on("before-quit", () => { app.isQuitting = true; try { ws && ws.close(); } catch {} });

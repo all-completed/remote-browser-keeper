@@ -5,27 +5,21 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// One HTML entry per Electron window. Built to ../renderer-dist; loaded by main.js.
-// base: './' so the built assets resolve under file:// (Electron loadFile).
+// ONE HTML entry, for the ONE Electron window (issue #28). Built to ../renderer-dist;
+// loaded by main.js. base: './' so the built assets resolve under file:// (Electron loadFile).
 export default defineConfig({
   root: 'ui',
   base: './',
   plugins: [react()],
   build: {
     outDir: '../renderer-dist',
+    // One bundle for the whole window (rsuite + the shell), loaded from disk: no network
+    // to split it for.
+    chunkSizeWarningLimit: 1500,
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        prompt: resolve(__dirname, 'ui/prompt.html'),
-        history: resolve(__dirname, 'ui/history.html'),
-        cards: resolve(__dirname, 'ui/cards.html'),
-        image: resolve(__dirname, 'ui/image.html'),
-        savedfields: resolve(__dirname, 'ui/savedfields.html'),
-        pair: resolve(__dirname, 'ui/pair.html'),
-        vaultpw: resolve(__dirname, 'ui/vaultpw.html'),
-        settings: resolve(__dirname, 'ui/settings.html'),
-        headless: resolve(__dirname, 'ui/headless.html'),
-        unlock: resolve(__dirname, 'ui/unlock.html'),
+        app: resolve(__dirname, 'ui/app.html'),
       },
     },
   },

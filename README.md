@@ -3,6 +3,13 @@
 A small **tray-resident Electron app** that supplies passwords/logins to remote
 browser sessions **without the value ever reaching the AI model**.
 
+It is **one window** (issue #28): Approvals, History, Cards, Saved fields, Headless
+Keepers, Pair phone, Vault password and Settings are pages of it, in the same dark
+sidebar shell as Getway Chat and the other f-proj apps — the shared
+[`@f-proj/ui-components`](https://github.com/vasyaod/ui-components) `AppShell` on
+rsuite. The tray / menu-bar icon opens it on any page; closing it hides it and the
+Keeper keeps running in the tray.
+
 ## Documentation
 
 - [docs/file-structure.md](docs/file-structure.md) — source tree, window/IPC
@@ -52,12 +59,14 @@ out of band: `you → keeper → service → form`. The model's path is only
 ```
 
 1. Keeper connects to `wss://<host>/api/keeper/ws` (token sent as an `Authorization: Bearer` header, never in the URL) and
-   auto-reconnects. It stays hidden in the system tray.
+   auto-reconnects. It stays in the system tray until it has something to ask.
 2. Agent calls `POST /api/sessions/{id}/request-fill` with `{selector, label, field}`
    (no value). Service registers a pending request and pushes `fill_request` to the
    user's connected Keeper(s).
-3. Keeper shows a small always-on-top prompt: the label (e.g. *"Password for
-   web.telegram.org"*) and a masked input. User submits (or cancels).
+3. Keeper brings its window up, over everything, on the **Approvals** page: the label
+   (e.g. *"Password for web.telegram.org"*) and a masked input. User submits (or
+   cancels — closing the window also declines). A window that a request brought up goes
+   away again once nothing is waiting.
 4. Keeper sends `fill_response {request_id, value}` back over the WS. The service
    fills the field via CDP using `fill` semantics, **discards the value**, and
    returns `{request_id, status:"filled"}` to the agent.
@@ -137,7 +146,7 @@ box; whatever is chosen or typed rides back as `reason` beside `cancelled: true`
 > Until then the Keeper sends it and the field is simply ignored, exactly as an older
 > service ignores `keeper_ui_failed` — the decline itself still works.
 
-`error: "keeper_ui_failed"` means the **approval window could not be shown** — the user was
+`error: "keeper_ui_failed"` means the **approval page could not be shown** — the user was
 never asked. It is deliberately distinct from a plain cancel (the user declined) and from a
 timeout (the user was away): an automation that sees it should **stop**, not retry, since
 retrying a login prompt nobody can approve just burns attempts against a lockout policy.
@@ -208,19 +217,44 @@ npm install
 npm start          # tray app; a test prompt can be forced with KEEPER_TEST=1
 ```
 
+### Building it
+
+The window's UI depends on [`@f-proj/ui-components`](https://github.com/vasyaod/ui-components),
+a **private** repo, as a git dependency pinned to a commit SHA (`package.json`
+devDependencies; vite bundles it into `renderer-dist/`, so the packaged app carries the
+built bundle, not the package). `npm install` therefore needs read access to it: a
+machine signed in to GitHub has it; CI gets it from **one repo secret**, either
+
+- `UI_COMPONENTS_DEPLOY_KEY` — an OpenSSH private key whose public half is a
+  **read-only deploy key** on `vasyaod/ui-components` (preferred: scoped to that one
+  repo, mintable unattended), or
+- `UI_COMPONENTS_TOKEN` — a fine-grained PAT with *Contents: Read* on that repo.
+
+`scripts/ui-components-credential.sh` (run by `.github/workflows/build.yml` before
+`npm ci` on every runner) takes whichever exists and fails the build without one. To
+mint the deploy key: generate an ed25519 pair in a temp dir, `POST
+repos/vasyaod/ui-components/keys` with the public half and `read_only=true`, then pipe the
+private half into `gh secret set UI_COMPONENTS_DEPLOY_KEY --repo
+all-completed/remote-browser-keeper` on stdin — never on a command line, never printed.
+This repo's CI uses the deploy key `remote-browser-keeper CI (read-only)` on
+`vasyaod/ui-components`, provisioned by issue #30; to rotate it, delete that key and the
+secret, then mint both again the same way.
+
 Config: `RBS_URL` (your service base URL, e.g. `https://rb.example.com`),
 `AC_API_KEY` / `~/.ac-api-key`.
 
-### If an approval window doesn't appear
+### If an approval doesn't appear
 
-The prompt window is kept hidden until its renderer reports the request is painted, so a
-window that can't render is reported instead of shown blank:
+A window that a request brings up is kept hidden until its renderer reports the request
+is painted on the Approvals page, so a page that can't render is reported instead of
+shown blank:
 
-- the menu-bar icon shows **⚠︎** and the tray menu names the failure (click it to dismiss);
+- the menu-bar icon shows **⚠︎** and the tray menu names the failure (click it to dismiss;
+  the Approvals page shows it too);
 - the log line is `[keeper] approval window failed to render: <cause>` (run `npm start`
   from a terminal, or `open -a "Remote Browser Keeper"` from one, to see it);
 - the request is answered with `error: "keeper_ui_failed"` instead of being left hanging,
-  and it appears in **History…** with the outcome `ui_failed`;
+  and it appears in **History** with the outcome `ui_failed`;
 - requests still waiting for you are listed in the tray menu under **Waiting for you**.
 
 Two diagnostic switches, both off by default:
@@ -228,15 +262,17 @@ Two diagnostic switches, both off by default:
 | Env | Effect |
 | --- | --- |
 | `KEEPER_RENDER_TIMEOUT_MS` | How long a prompt may take to appear before it is declared failed (default 15000). |
-| `KEEPER_NO_CONTENT_PROTECTION=1` | Disables the screen-capture exclusion for one run, to rule it in or out as the cause of a window that won't paint. **Security trade-off: Keeper windows become capturable while it is set** — diagnosis only, never a normal way to run. |
+| `KEEPER_NO_CONTENT_PROTECTION=1` | Disables the screen-capture exclusion for one run, to rule it in or out as the cause of a window that won't paint. **Security trade-off: the Keeper window becomes capturable while it is set** — diagnosis only, never a normal way to run. |
 
 ## Files
 
-Full layout — source tree, windows/IPC, and the on-disk data store — is in
+Full layout — source tree, window/IPC, and the on-disk data store — is in
 [docs/file-structure.md](docs/file-structure.md). In short:
 
-- `src/main.js` — main process: tray, keeper WS client (reconnect), prompt /
-  history / image windows, IPC, and per-URL history storage
+- `src/main.js` — main process: tray, keeper WS client (reconnect), the one window
+  (pages, the approval queue on screen, render supervision), IPC, and per-URL history
+  storage
+- `src/windowstate.js` — the window's remembered size/position (ported from Getway Chat)
 - `src/config.js` — base URL + API key resolution
 - `src/outbox.js` — answers the socket could not take: held, re-sent on reconnect,
   and reported if the request dies first ([above](#an-answer-is-never-dropped-silently))
@@ -244,7 +280,8 @@ Full layout — source tree, windows/IPC, and the on-disk data store — is in
   history, and its union with the local log: **History…** shows one list, each row
   tagged *local only* / *server only* / *both*
   ([details](docs/file-structure.md#request-history--one-list-from-two))
-- `src/*-preload.cjs` — `contextBridge` bridges for the prompt / history / image windows
-- `renderer/{prompt,history,image}.*` — the window UIs
+- `src/preload.cjs` — the one `contextBridge` preload (one bridge object per page)
+- `ui/` — the window's UI (vite → `renderer-dist/app.html`): `App.jsx` (the AppShell and
+  its nav), `pages/*Page.jsx`, `brand.js` (name, app icon, service colour)
 - `~/.remote-browser-keeper/<base-url>/` — history (`history.jsonl`) + proof
   `screenshots/`, kept separate per service URL

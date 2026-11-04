@@ -1,43 +1,37 @@
 import { useState } from "react";
+import { Input, InputGroup } from "rsuite";
+import VisibleIcon from "@rsuite/icons/Visible";
+import UnvisibleIcon from "@rsuite/icons/Unvisible";
 
-// A labeled form field: a caption above the control, optional hint below. Shared
-// by the prompt and the Saved-cards form so both use the same structure/styling.
+// A labeled form field: a caption above the control, optional hint below. Shared by the
+// fill prompt and the Cards form so both use the same structure. The controls inside are
+// rsuite's; this is only the label/selector/hint around them.
 export function Field({ label, hint, selector, children }) {
   return (
-    <label className="fld">
-      <span>{label}</span>
+    <div className="fld">
+      <span className="fld-label">{label}</span>
       {selector ? (
-        <span
-          className="selector"
-          title="The exact element the service will fill"
-          style={{
-            fontFamily: "ui-monospace, monospace",
-            fontSize: 11.5,
-            color: "var(--muted2)",
-            wordBreak: "break-all",
-            margin: "1px 0 3px",
-          }}
-        >
-          {selector}
-        </span>
+        <span className="fld-selector" title="The exact element the service will fill">{selector}</span>
       ) : null}
       {children}
-      {hint ? <span className="hint">{hint}</span> : null}
-    </label>
+      {hint ? <span className="fld-hint">{hint}</span> : null}
+    </div>
   );
 }
 
 // A text input with an optional reveal (eye) toggle for secret values. Masking is
-// self-managed; pass `secret` to enable it.
-export function RevealInput({ secret, ...props }) {
+// self-managed; pass `secret` to enable it. `onChange` gets the event, like a native
+// input's, so callers read `e.target.value`.
+export function RevealInput({ secret, onChange, ...props }) {
   const [shown, setShown] = useState(false);
-  if (!secret) return <input type="text" {...props} />;
+  const change = (_v, e) => onChange && onChange(e);
+  if (!secret) return <Input type="text" {...props} onChange={change} />;
   return (
-    <span className="inrow">
-      <input type={shown ? "text" : "password"} {...props} />
-      <button type="button" className="reveal" title="Show / hide" onClick={() => setShown((s) => !s)} aria-label="Show or hide">
-        👁
-      </button>
-    </span>
+    <InputGroup inside>
+      <Input type={shown ? "text" : "password"} {...props} onChange={change} />
+      <InputGroup.Button title="Show / hide" aria-label="Show or hide" onClick={() => setShown((s) => !s)}>
+        {shown ? <UnvisibleIcon /> : <VisibleIcon />}
+      </InputGroup.Button>
+    </InputGroup>
   );
 }

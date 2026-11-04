@@ -1,7 +1,15 @@
-// Register the keeper onRequest listener at module-load time (before React mounts)
-// so a fill_request that arrives during/after window show is never missed.
+// The fill request on screen, delivered to the Approvals page. Registered at module-load
+// time (before React mounts) so a fill_request that arrives during/after window show is
+// never missed.
+//
+// Since the Keeper became one window (issue #28) the same document outlives every request,
+// so the bridge also forgets: main says when the request on screen is gone (answered
+// elsewhere, failed, expired) and the page clears it when the user answers — a later mount
+// must never replay a request that is already over.
 let latest = null;
 const subs = new Set();
+const expired = new Set(); // request_ids main or the countdown retired (issue #12)
+const expiredSubs = new Set();
 
 function deliver(req) {
   if (!req) return;
@@ -11,6 +19,12 @@ function deliver(req) {
 
 if (typeof window !== "undefined" && window.keeper && window.keeper.onRequest) {
   window.keeper.onRequest(deliver);
+}
+if (typeof window !== "undefined" && window.keeper && window.keeper.onRequestGone) {
+  window.keeper.onRequestGone((m) => clear(m && m.request_id));
+}
+if (typeof window !== "undefined" && window.keeper && window.keeper.onExpired) {
+  window.keeper.onExpired((m) => markExpired(m && m.request_id));
 }
 
 // …and ask for it as well. Push and pull are each sufficient on their own; together, no
@@ -31,4 +45,22 @@ export function subscribe(fn) {
   subs.add(fn);
   if (latest) fn(latest);
   return () => subs.delete(fn);
+}
+// Drop the request on screen (only if it is still `requestId`, so a late "gone" for an
+// older request cannot clear a newer one). Subscribers hear `null`.
+export function clear(requestId) {
+  if (!latest || (requestId != null && latest.request_id !== requestId)) return;
+  latest = null;
+  subs.forEach((fn) => fn(null));
+}
+
+export function markExpired(requestId) {
+  if (!requestId || expired.has(requestId)) return;
+  expired.add(requestId);
+  expiredSubs.forEach((fn) => fn(requestId));
+}
+export function isExpired(requestId) { return expired.has(requestId); }
+export function subscribeExpired(fn) {
+  expiredSubs.add(fn);
+  return () => expiredSubs.delete(fn);
 }

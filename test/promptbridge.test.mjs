@@ -86,3 +86,37 @@ test("a rejected pull is swallowed (main reports the failure instead)", async ()
   await tick();
   assert.equal(bridge.getLatest(), null);
 });
+
+// Issue #28: the one window outlives every request, so the bridge must forget one that is
+// over — a page that mounts later must not replay an answered request.
+test("clear: an answered or dropped request is not replayed to a later subscriber", async () => {
+  let push = null;
+  let gone = null;
+  const bridge = await loadBridge({
+    onRequest: (cb) => { push = cb; },
+    onRequestGone: (cb) => { gone = cb; },
+  }, "clear");
+  const seen = [];
+  bridge.subscribe((r) => seen.push(r));
+  push(REQ);
+  bridge.clear("someone-else");            // a late "gone" for another request…
+  assert.equal(bridge.getLatest(), REQ);   // …does not clear this one
+  gone({ request_id: REQ.request_id });    // main dropped it (answered elsewhere / failed)
+  assert.equal(bridge.getLatest(), null);
+  assert.deepEqual(seen, [REQ, null], "subscribers hear it go");
+  const late = [];
+  bridge.subscribe((r) => late.push(r));
+  assert.deepEqual(late, [], "nothing replayed");
+});
+
+test("expired: either side retiring a request is remembered per request_id", async () => {
+  let expire = null;
+  const bridge = await loadBridge({ onRequest: () => {}, onExpired: (cb) => { expire = cb; } }, "expired");
+  const heard = [];
+  bridge.subscribeExpired((id) => heard.push(id));
+  expire({ request_id: "r1" });
+  bridge.markExpired("r1");                // the countdown noticing too is not a second event
+  assert.deepEqual(heard, ["r1"]);
+  assert.equal(bridge.isExpired("r1"), true);
+  assert.equal(bridge.isExpired("r2"), false);
+});

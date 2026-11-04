@@ -1,0 +1,99 @@
+/* The Keeper's own rules, on top of rsuite's dark theme and the @f-proj/ui-components
+   shell (issue #28). Colours come from the shell's tokens (--app-color-*) and rsuite's
+   variables — no palette of its own, so it sits in the same family as Getway Chat and the
+   other f-proj apps. Layout only: every control is rsuite's. */
+
+/* Secrets on screen: nothing is selectable by accident, except where the user is meant
+   to read or copy (inputs, a revealed value). */
+body { -webkit-user-select: none; user-select: none; }
+input, textarea, code, .revealed, .selectable { -webkit-user-select: text; user-select: text; }
+
+.page-col { display: flex; flex-direction: column; gap: 14px; max-width: 760px; padding: 16px 0 32px; }
+.page-col.narrow { max-width: 460px; }
+.muted { color: var(--app-color-text-muted); }
+.small { font-size: 12px; }
+.block { display: block; }
+.strong { font-weight: 600; color: var(--app-color-text); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.wrap { word-break: break-all; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.push { margin-left: auto; }
+.center { text-align: center; }
+p { margin: 0; }
+
+.row { display: flex; align-items: center; gap: 10px; }
+.chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.chips .rs-tag { margin-left: 0; }
+.list { display: flex; flex-direction: column; gap: 10px; }
+.entry .rs-panel-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.kv { font-size: 13px; color: var(--app-color-text-secondary); word-break: break-word; }
+.revealed { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.revealed code { word-break: break-all; background: var(--app-color-pressed); padding: 2px 6px; border-radius: 5px; }
+.badge-src { opacity: 0.75; }
+.shot img { max-width: 100%; border-radius: 6px; cursor: zoom-in; border: 1px solid var(--app-color-border); }
+.shot { margin: 0; }
+
+.empty { padding: 28px 4px; }
+.empty-title { font-size: 15px; color: var(--app-color-text); margin-bottom: 6px; }
+
+/* A request waiting for the user (fill or headless unlock). */
+.request .rs-panel-header { padding-bottom: 8px; }
+.request-head { display: flex; flex-direction: column; gap: 8px; }
+.request-title { font-size: 16px; font-weight: 600; color: var(--app-color-text); }
+.request-sub { font-size: 13px; font-weight: 400; color: var(--app-color-text-muted); }
+.request-message { color: var(--app-color-text-secondary); margin-bottom: 12px; white-space: pre-wrap; }
+.request-note { margin-top: 12px; }
+.proof { margin: 0 0 14px; cursor: zoom-in; }
+.proof img { display: block; max-width: 100%; max-height: 320px; border-radius: 8px; border: 1px solid var(--app-color-border); }
+.proof figcaption { font-size: 12px; color: var(--app-color-text-muted); margin-top: 6px; }
+.fields, .form { display: flex; flex-direction: column; gap: 14px; }
+.cardPicker { display: flex; flex-direction: column; gap: 14px; }
+.fld { display: flex; flex-direction: column; gap: 4px; }
+.fld-label { font-size: 13px; font-weight: 600; color: var(--app-color-text); }
+.fld-selector { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--app-color-text-muted); word-break: break-all; }
+.fld-hint { font-size: 12px; color: var(--app-color-text-muted); }
+.fld-hint.err { color: var(--app-color-danger); }
+.decline { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.decline-row { display: flex; gap: 8px; }
+.actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.actions .status { margin-right: auto; font-size: 13px; color: var(--app-color-text-muted); }
+.actions .status.ok { color: var(--app-color-success); }
+.actions .status.err { color: var(--app-color-danger); }
+.unlock-code { text-align: center; }
+.unlock-code-value { font-size: 28px; letter-spacing: 2px; margin: 4px 0; color: var(--app-color-text); }
+
+/* Cards form */
+.grid2, .grid3 { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.billing { border: 1px solid var(--app-color-border); border-radius: 8px; padding: 10px 14px 14px; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+.billing legend { padding: 0 6px; font-size: 13px; color: var(--app-color-text-secondary); width: auto; border: 0; margin: 0; }
+
+/* Pair */
+.qr { border-radius: 12px; background: #fff; padding: 10px; margin: 6px auto 12px; display: block; }
+.center .rs-panel-body { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+
+/* Settings */
+.dl-row { display: flex; gap: 12px; align-items: baseline; padding: 3px 0; }
+.dl-key { flex: 0 0 96px; font-size: 12.5px; color: var(--app-color-text-muted); }
+.dl-val { font-size: 13px; color: var(--app-color-text); word-break: break-all; }
+.dl-note { margin-top: 10px; }
+.toggle-row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+.toggle-row .rs-toggle { flex: 0 0 auto; margin-top: 2px; }
+
+/* Sidebar footer: the connection, as the tray says it. */
+.conn { display: flex; align-items: center; gap: 10px; padding: 12px 20px; font-size: 12.5px; color: var(--app-color-text-secondary); }
+.conn-rail { justify-content: center; padding: 12px 0; }
+.conn-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
+.conn-dot.on { background: var(--app-color-success); }
+.conn-dot.off { background: #f2b33d; }
+.conn-text { display: flex; flex-direction: column; min-width: 0; }
+.conn-host { color: var(--app-color-text-muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Full-size screenshot */
+.image-viewer .rs-modal-body { text-align: center; }
+.image-viewer-img { max-width: none; border-radius: 6px; }
+
+@media (max-width: 560px) {
+  .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

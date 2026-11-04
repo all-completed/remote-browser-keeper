@@ -23,9 +23,12 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@f-proj/ui-components": "git+https://github.com/vasyaod/ui-components.git#a2914b4147513d6c6b5b1062b856de05936b8aa9",
+    "@rsuite/icons": "^1.4.1",
     "@vitejs/plugin-react": "^4.3.1",
     "electron": "^33.0.0",
     "electron-builder": "^24.13.3",
+    "rsuite": "^5.83.4",
     "vite": "^5.4.2"
   },
   "build": {
