@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Tag } from "rsuite";
 import { formatRemaining, remainingMs } from "../lib/format.js";
 
 // How long is left to answer this request, as a chip next to the session/url ones.
@@ -36,11 +37,13 @@ export default function Countdown({ expiresAt, onExpire }) {
 
   if (left == null) return null;
   return (
-    <span
-      className={"chip timeleft" + (gone ? " gone" : left <= 30000 ? " soon" : "")}
+    <Tag
+      size="sm"
+      color={gone ? "red" : left <= 30000 ? "orange" : undefined}
+      className="timeleft"
       title={gone ? "The request has expired" : `Expires at ${new Date(expiresAt).toLocaleTimeString()}`}
     >
       {gone ? "expired" : `${formatRemaining(left)} left`}
-    </span>
+    </Tag>
   );
 }

@@ -16,23 +16,26 @@ remote-browser-keeper/
 │       └── build.yml       # CI: build desktop artifacts for every OS + arch
 ├── docs/
 │   └── file-structure.md   # this file
-├── src/                    # Electron main process + preload bridges (Node side)
+├── scripts/
+│   └── ui-components-credential.sh  # CI: read access to the private @f-proj/ui-components
+├── src/                    # Electron main process + the one preload (Node side)
 │   ├── main.js
 │   ├── config.js
+│   ├── windowstate.js
 │   ├── preload.cjs
-│   ├── history-preload.cjs
-│   └── image-preload.cjs
-└── renderer/               # window UIs (sandboxed browser side, no Node access)
-    ├── prompt.{html,css,js}
-    ├── history.{html,css,js}
-    └── image.{html,js}
+│   └── assets/             # tray template PNGs (unchanged) + the window's app icon
+├── ui/                     # the ONE window's UI (sandboxed, no Node access) → renderer-dist/
+│   ├── app.html, main.jsx, App.jsx, brand.js
+│   ├── pages/              # Approvals, History, Cards, Saved fields, Headless, Pair, Vault password, Settings
+│   ├── components/, lib/, styles/app.css
+└── test/                   # node --test; test/fake-electron/ runs main.js without Electron
 ```
 
 ### `src/` — main process (Node)
 
 | File | Responsibility |
 | --- | --- |
-| `main.js` | The whole main process: tray-only lifecycle (dock hidden), the **Keeper WebSocket client** (connect/reconnect, `hello`/`ping`/`pong`, receive `fill_request`, send `fill_response`), the **prompt-window queue**, the **History window**, the **full-size image viewer**, the **tray menu** (service host + connection state, History…, Quit), and **local history + screenshot storage** (see below). |
+| `main.js` | The whole main process: the tray lifecycle (a dock icon only while the window is open), the **Keeper WebSocket client** (connect/reconnect, `hello`/`ping`/`pong`, receive `fill_request`, send `fill_response`), the **one window** (its pages, the approval queue on screen and its render supervision — see [Windows & IPC](#windows--ipc)), the **tray menu** (service host + connection state, a page per entry, Quit), and **local history + screenshot storage** (see below). |
 | `config.js` | Resolves `{ baseUrl, apiKey }` — `RBS_URL` / default `https://rb.example.com`, and the API key from `AC_API_KEY` / `RBS_API_KEY` / `AC_API_KEY_FILE` / `~/.ac-api-key`. Also derives `keeperWsUrl`. |
 | `device.js` | This device's identity (`device.json` id, machine name, platform, app version) and the inert vault-state report sent on connect / shown in Settings — see [`device.json`](#devicejson--who-this-device-is). |
 | `enroll.js` | Trading the shared account key for a token of this device's own (issue #15): when to ask, what a service's answer means, and when a token has been revoked. Electron-free so the decision table is unit-tested. |
@@ -45,72 +48,98 @@ remote-browser-keeper/
 | `onetimecode.js` | **One-time codes (field kind `code`) are never saved and never replayed** (issue #24): `isOneTimeCode`, `autofillValues` (the silent-fill decision — any code field sends the request to the prompt, even if an earlier build stored one) and `savableValues` (what `keeper:save-fields` may store — never a code, judged by the pending request's kinds). Pure; shared by the main process and the prompt, which hides the save control for a codes-only request. |
 | `ipcsender.js` | **Who may send a given IPC message.** `rendererUrl(page, …)` is the single definition of "one of our own documents" — used both to load a window and to check that a message really came from it; `refuseSender(sender, allowed)` is the decision. Pure; see [Windows & IPC](#windows--ipc). |
 | `headless.js` | **Headless Keepers** (rbkeeper-unlock-v1, issue #26): the `hk1_` id and `rbk1-` fingerprint of a daemon key, vault pins (`headless_keepers`), Ed25519 verification of an `unlock_request`, the replay guard, the comparison code, the HPKE seal of the unlock payload, and the service calls (register / delete a headless Keeper, revoke older boot tokens, enroll the new one with `secret_bound: false`). Pure apart from the injected `fetch`; see [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md). |
-| `preload.cjs` | `contextBridge` for the **prompt** renderer: `onRequest`, `submit`, `cancel(request_id, reason?)`, `viewImage`, `onExpired`/`reportExpired`. |
-| `history-preload.cjs` | `contextBridge` for the **History** window: `onData`, `refresh`, `screenshot(id)`, `viewImage`. |
-| `image-preload.cjs` | `contextBridge` for the **image viewer**: `onData`, `sized(w,h)`. |
-| `headless-preload.cjs` | `contextBridge` for the **Headless Keepers** window: `list`, `preview(publicKey)` (id + fingerprint), `add(name, publicKey)`, `remove(id)`. |
-| `unlock-preload.cjs` | `contextBridge` for the **Headless Keeper restarted** (Approve / Deny) window: `get`, `approve(requestId)`, `deny(requestId)`, `onChanged`. |
+| `windowstate.js` | The window's remembered size, position and maximized state (`window.json` in Electron's userData), and the fallback to a centred default when the monitor it was on is gone. Ported from Getway Chat desktop. Pure. |
+| `preload.cjs` | The **one** `contextBridge` preload for the one window (issue #28): `keeperApp` (page navigation + status), `keeper` (fill requests), `keeperUnlock`, `keeperHistory`, `keeperCards`, `savedFields`, `keeperPair`, `keeperVault`, `keeperHeadless`, `keeperSettings` — the same bridge names the separate windows' preloads used. |
 
 Preloads are `.cjs` because the app is ESM (`"type": "module"`) and Electron
 preload scripts must be CommonJS.
 
-### `renderer/` — window UIs (sandboxed)
+### `ui/` — the one window (sandboxed)
 
-Each window runs with `contextIsolation: true`, `nodeIntegration: false`,
-`sandbox: true`, a strict CSP, and all navigation / `window.open` denied. They talk
-to the main process only through their preload bridge.
+Since issue #28 the Keeper has **one** `BrowserWindow`, running with
+`contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, a strict CSP, and
+all navigation / `window.open` denied. Its UI is one vite entry (`ui/app.html` →
+`renderer-dist/app.html`) built on rsuite and the shared
+[`@f-proj/ui-components`](https://github.com/vasyaod/ui-components): an `AppShell`
+(sidebar, brand block, collapsible rail, phone drawer under 768 px) whose nav entries are
+the pages below, each a `PageHeader` + `PageBody`. The tray opens the window on a page;
+the sidebar moves between them in place.
 
-| Files | Window |
+| Page | What used to be |
 | --- | --- |
-| `prompt.{html,css,js}` | The **fill prompt**: one proof screenshot (tap to enlarge), session/url chips, the agent's message, and one masked input per field (reveal toggle, `length` cap, `format` constraint). Send / Cancel — with a **▾ beside Cancel** that opens preset + free-text decline reasons in place (see [Declining with a reason](#declining-with-a-reason)). |
-| `history.{html,css,js}` | The **History** window: past requests (status, provenance, session, url, fields, time) with a *View screenshot* toggle. One list merged from this device's log **and** the service's — see [Request history — one list from two](#request-history--one-list-from-two). |
-| `image.{html,js}` | The **full-size screenshot viewer** (opened from the prompt or History; the window fits the image's natural size). |
+| `pages/ApprovalsPage.jsx` | the **fill prompt** window *and* the **Headless Keeper restarted** window: the fill request on screen (proof screenshot — click to enlarge — session/url chips, the agent's message, one masked input per field, Send / Cancel with a **▾** for [decline reasons](#declining-with-a-reason)), any headless-Keeper unlock request (code, Approve / Deny), and the tray's warnings. It stays mounted while another page is shown, so a half-typed value survives a trip to History. |
+| `pages/HistoryPage.jsx` | the **History** window — one list from this device's log **and** the service's ([details](#request-history--one-list-from-two)). |
+| `pages/CardsPage.jsx`, `SavedFieldsPage.jsx`, `HeadlessPage.jsx`, `PairPage.jsx`, `VaultPasswordPage.jsx`, `SettingsPage.jsx` | the windows of the same names. |
+| `components/ImageViewer.jsx` | the **full-size screenshot** window — now an in-app full-size modal. |
+
+`ui/brand.js` is the brand the shell wears: the name, the app icon and the service colour
+(the accent and rsuite's primary palette). **Pending vasyaod/icons#11** it is the current
+app icon and its blue; the registry's flat icon and colour replace both there.
 
 ### Headless Keepers (rbkeeper-unlock-v1)
 
-Two more windows, built by vite from `ui/` like Settings:
+Two pages of the one window:
 
-- **Headless Keepers…** (tray) — `ui/headless.html` + `ui/apps/HeadlessApp.jsx`: the
+- **Headless Keepers** (tray → *Headless Keepers…*) — `ui/pages/HeadlessPage.jsx`: the
   pinned headless Keepers, and **Add headless Keeper** (a name + the daemon's Ed25519
-  public key). The window shows the key's `rbk1-…` fingerprint, and *Add* stays disabled
+  public key). The page shows the key's `rbk1-…` fingerprint, and *Add* stays disabled
   until the owner confirms it matches the daemon's. Add registers the key with the service,
   checks that the service's `headless_id` equals the local one, then pins it in the vault
   blob (`headless_keepers`) and syncs.
-- **Headless Keeper restarted** — `ui/unlock.html` + `ui/apps/UnlockApp.jsx`: opened
-  (always on top) when a verified `unlock_request` arrives. It shows the pinned name, the
-  restart time and the comparison code, and offers **Deny** / **Approve**. Nothing is ever
-  approved without a click; the window closes on `unlock_resolved` or after about 5 minutes.
+- **Headless Keeper restarted** — on `ui/pages/ApprovalsPage.jsx`: when a verified
+  `unlock_request` arrives the window comes up (always on top) on Approvals. It shows the
+  pinned name, the restart time and the comparison code, and offers **Deny** / **Approve**.
+  Nothing is ever approved without a click, and closing the window is not an answer; the
+  request goes on `unlock_resolved` or after about 5 minutes.
 
 The protocol, the pins and the failure behaviour are in
 [`rbkeeper-unlock-v1.md`](rbkeeper-unlock-v1.md).
 
 ### Windows & IPC
 
-The main process owns the WebSocket and three `BrowserWindow`s — **prompt**,
-**history**, **image** — created on demand. Data flows main → renderer over the
-preload bridge (e.g. `keeper:request`, `history:data`, `image:data`) and back via
-IPC (`keeper:submit`, `history:screenshot`, `keeper:view-image`). The typed value
+The main process owns the WebSocket and **one** `BrowserWindow` (issue #28), created on
+demand — by a tray entry, the dock icon, or a request — and hidden, never destroyed, when
+the user closes it. Main tells the renderer which page to show (`app:navigate`) and what
+the tray knows (`app:status`: connection, queue sizes, warnings); the renderer reports the
+page the user moved to (`app:page`). Request data flows main → renderer over the preload
+bridge (`keeper:request`, `keeper:request-gone`, `keeper:expired`, `history:data`,
+`unlock:changed`) and back via IPC (`keeper:submit`, `keeper:cancel`, …). The typed value
 travels renderer → main → WebSocket only; it is never written to disk or logged.
 
+**A request on screen** keeps every rule the prompt window had (issue #3): a window a
+request brings up stays hidden until the renderer reports the request painted
+(`keeper:prompt-rendered`); the request is both pushed and pullable
+(`keeper:pending-request`); and if it is not on screen within `KEEPER_RENDER_TIMEOUT_MS`
+it is answered `keeper_ui_failed`. While a fill or unlock request waits the window floats
+over other apps; once nothing waits it stops, and if a request is what brought it up it
+hides again. Closing the window while a fill request is on screen declines it, as closing
+the prompt window did.
+
 **Every handler validates its sender** (`src/ipcsender.js`, issue #18). `ipcMain` has
-no notion of which window a channel belongs to, so a handler that answers whoever asked
-serves *every* renderer — and the ones that carry a secret (`pair:qr`, `fields:reveal`,
-`keeper:card-values`, `keeper:saved-values`, `cards:load`) or answer a pending request
-(`keeper:submit`) would serve it to whichever renderer asks first. So each handler names
-the window(s) it serves and starts with `fromWindow(event, channel, …wins)`, which
-requires all three of:
+no notion of which renderer a channel belongs to, so a handler that answers whoever asked
+serves *every* renderer and frame — and the ones that carry a secret (`pair:qr`,
+`fields:reveal`, `keeper:card-values`, `keeper:saved-values`, `cards:load`) or answer a
+pending request (`keeper:submit`) would serve it to whichever asks first. So each handler
+starts with `fromWindow(event, channel, mainWin)`, which requires all three of:
 
-1. the sender **is** one of those windows (identity, by `webContents.id`);
-2. the message came from that window's **top frame**, not an embedded one;
-3. that frame is still showing **our own document** — `rendererUrl(win.keeperPage)`, the
-   very URL `loadWindow` put there.
+1. the sender **is** the main window (identity, by `webContents.id`);
+2. the message came from its **top frame**, not an embedded one;
+3. that frame is still showing **our own document** — `rendererUrl("app")`, the very URL
+   `loadWindow` put there.
 
-The preload bridges are the first layer (a renderer can only call what its own preload
-exposes); this is the layer under it, for anything that gets past isolation. A refusal is
-logged (`[keeper] refused IPC "<channel>": <reason>`) and the handler returns its ordinary
-"nothing" — `null` / `[]` / `{ ok: false }` — never an error that would confirm the channel
-exists. `keeper:vault-status` (prompt + vaultpw) and `keeper:view-image` (prompt + history)
-are the only channels served for two windows.
+The preload bridge is the first layer; this is the layer under it, for anything that gets
+past isolation. A refusal is logged (`[keeper] refused IPC "<channel>": <reason>`) and the
+handler returns its ordinary "nothing" — `null` / `[]` / `{ ok: false }` — never an error
+that would confirm the channel exists.
+
+What one window gives up: with ten windows, a page could only reach its own channels, so
+History (which renders the service's data and screenshots) could not have asked for the
+pair QR even with its renderer compromised. In one renderer every page's bridge is there.
+What stays: the renderer is still sandboxed and context-isolated under a CSP of
+`script-src 'self'` with no remote content, every string from the service is rendered as
+React text, images only as `data:` URLs, navigation and popups are denied, and the
+values that matter most never enter the renderer at all (the pair QR's token is inside an
+image main draws; the unlock key is sealed in main).
 
 ### Declining with a reason
 
@@ -449,13 +478,21 @@ with **electron-builder** on a 3-runner matrix, each producing both architecture
 
 | Runner | Targets | Arches |
 | --- | --- | --- |
-| `macos-14` | `dmg`, `zip` | x64 (Intel), arm64 (Apple Silicon) |
+| `macos-15` | `dmg`, `zip` | x64 (Intel), arm64 (Apple Silicon) |
 | `ubuntu-latest` | `AppImage`, `tar.gz` | x64, arm64 |
 | `windows-latest` | `nsis` installer, `portable` | x64, arm64 |
 
 Each job uploads a `remote-browser-keeper-<platform>` artifact. The build runs on
 every branch push and via **workflow_dispatch**. Locally: `npm run dist` (current
 OS). electron-builder config lives in `package.json` under `build`.
+
+Before `npm ci` every job runs `scripts/ui-components-credential.sh`: the window's UI
+depends on the **private** `vasyaod/ui-components` (a git dependency pinned to a SHA), so
+the repo needs the `UI_COMPONENTS_DEPLOY_KEY` (or `UI_COMPONENTS_TOKEN`) secret — see
+README → *Building it*. The Linux job also runs `npm test`, and every job checks that the
+built CSS really carries the library's rules. rsuite and the library are
+devDependencies: vite bundles them into `renderer-dist/`, and the packaged app carries no
+copy of either package.
 
 ### Icons
 
@@ -466,7 +503,7 @@ actually ships.
 | Source | Derived (committed) | Used by |
 | --- | --- | --- |
 | `src/assets/tray.svg` | `trayTemplate.png` (16×16), `trayTemplate@2x.png` (32×32) | `createTray()` in `main.js` — loaded by name, `@2x` picked up automatically |
-| `build/icon.svg` | `icon.png` (1024×1024), `icon.icns`, `icon.ico` | electron-builder (`package.json` → `build.mac/win/linux.icon`) |
+| `build/icon.svg` | `icon.png` (1024×1024), `icon.icns`, `icon.ico`; `src/assets/icon.png` (a copy of `icon.png`) | electron-builder (`package.json` → `build.mac/win/linux.icon`); the window/taskbar icon (`APP_ICON` in `main.js`) and the sidebar brand (`ui/brand.js`) |
 
 ```sh
 # tray template — rasterise at exactly 16 and 32 px, black-on-transparent

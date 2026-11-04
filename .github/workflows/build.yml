@@ -4,6 +4,28 @@ name: build
 #   macOS  : x64 (Intel) + arm64 (Apple Silicon)   — dmg + zip
 #   Linux  : x64 (Intel) + arm64                    — AppImage + tar.gz
 #   Windows: x64 (Intel) + arm64                    — nsis installer + portable
+#
+# Required repo secret (issue #28) — set it before a run: an unset Actions secret
+# expands to the empty string rather than failing, so the symptom would otherwise be a
+# confusing `npm ci` clone error instead of "secret missing".
+#
+#   UI_COMPONENTS_DEPLOY_KEY *or* UI_COMPONENTS_TOKEN
+#       a read-only credential for the PRIVATE repo vasyaod/ui-components, which the
+#       window's UI (AppShell, PageHeader, PageBody, ActionMenu, CopyButton) depends on
+#       as a git dependency pinned to a commit SHA (package.json devDependencies): an
+#       OpenSSH private key whose public half is a read-only deploy key on that repo, or
+#       a fine-grained PAT with Contents: Read on it. scripts/ui-components-credential.sh
+#       takes whichever exists — the same pair, and the same script, as icons,
+#       f-proj-phone, commune-service and remote-device-service. HOW TO PROVISION ONE:
+#       README.md, "Building it". The default GITHUB_TOKEN cannot serve: it is scoped
+#       to this repository only.
+#
+# This workflow has no `pull_request` trigger, so a fork's PR never runs it and never
+# sees the secret; only pushes by people with write access to this repo do.
+#
+# GITHUB_TOKEN is no secret to set: it is handed to the credential script so its
+# api.github.com/meta lookup (GitHub's SSH host keys) is authenticated instead of sharing
+# the runner IP's 60/hour.
 on:
   push:
     branches: ["**"]
@@ -36,11 +58,37 @@ jobs:
           node-version: "20"
           cache: npm
 
+      # Before `npm ci`: @f-proj/ui-components is a git dependency on a PRIVATE repo,
+      # which this run's GITHUB_TOKEN cannot read. The script writes the credential to a
+      # 0600 file and git config; it never prints it, and fails the run without one.
+      # bash on every runner, Windows included (Git Bash), so all three set git up the
+      # same way.
+      - name: Credential for the private @f-proj/ui-components
+        shell: bash
+        env:
+          UI_COMPONENTS_DEPLOY_KEY: ${{ secrets.UI_COMPONENTS_DEPLOY_KEY }}
+          UI_COMPONENTS_TOKEN: ${{ secrets.UI_COMPONENTS_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/ui-components-credential.sh
+
       - name: Install dependencies
         run: npm ci
 
+      # Once, on Linux: the suite is plain node (test/mainwindow.test.mjs fakes Electron),
+      # and `node --test test/*.mjs` leaves the glob to the shell, which cmd.exe doesn't do.
+      - name: Unit tests
+        if: runner.os == 'Linux'
+        run: npm test
+
       - name: Build renderer (Vite)
-        run: npm run build:ui
+        shell: bash
+        run: |
+          npm run build:ui
+          # The one window's document, and the shared library actually in it (issue #28):
+          # not merely listed in package.json.
+          test -s renderer-dist/app.html
+          grep -q "app-shell" renderer-dist/assets/*.css || {
+            echo "the built CSS carries no @f-proj/ui-components rules" >&2; exit 1; }
 
       - name: Build (${{ matrix.platform }}, x64 + arm64)
         run: npx electron-builder --${{ matrix.platform }} --x64 --arm64 --publish never

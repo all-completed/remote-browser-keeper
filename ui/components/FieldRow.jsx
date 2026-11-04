@@ -1,3 +1,5 @@
+import { Input, InputGroup, SelectPicker } from "rsuite";
+import ReloadIcon from "@rsuite/icons/Reload";
 import { describeField } from "../lib/format.js";
 import { Field, RevealInput } from "./Field.jsx";
 
@@ -15,21 +17,23 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   if (field.generate) {
     return (
       <Field label={label} selector={field.selector} hint={d.hint || "Generated in the Keeper — review, then Send"}>
-        <div className="inrow">
-          <input
+        <InputGroup inside>
+          <Input
             type="text"
+            className="mono"
             value={value || ""}
             maxLength={d.maxLen || undefined}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
-            style={{ fontFamily: "ui-monospace, monospace" }}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(v) => onChange(v)}
             onKeyDown={keyDown}
           />
-          <button type="button" className="reveal" title="Generate a new one" onClick={() => onGenerate && onGenerate(field)}>↻</button>
-        </div>
+          <InputGroup.Button title="Generate a new one" aria-label="Generate a new one" onClick={() => onGenerate && onGenerate(field)}>
+            <ReloadIcon />
+          </InputGroup.Button>
+        </InputGroup>
       </Field>
     );
   }
@@ -38,10 +42,15 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   if (d.mode === "month" || d.mode === "year") {
     return (
       <Field label={label} selector={field.selector} hint={d.hint}>
-        <select value={value || ""} onChange={(e) => onChange(e.target.value)}>
-          <option value="">{d.mode === "month" ? "Month (MM)" : "Year"}</option>
-          {d.options.map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
+        <SelectPicker
+          block
+          searchable={false}
+          cleanable={false}
+          placeholder={d.mode === "month" ? "Month (MM)" : "Year"}
+          data={d.options.map((o) => ({ label: o, value: o }))}
+          value={value || null}
+          onChange={(v) => onChange(v || "")}
+        />
       </Field>
     );
   }
@@ -49,13 +58,14 @@ export default function FieldRow({ field, value, onChange, onSubmit, onCancel, o
   if (d.mode === "multiline") {
     return (
       <Field label={label} selector={field.selector} hint={d.hint}>
-        <textarea
+        <Input
+          as="textarea"
           rows={3}
           value={value || ""}
           placeholder="Type here…"
           autoCapitalize="sentences"
           spellCheck={false}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(v) => onChange(v)}
           onKeyDown={keyDown}
         />
       </Field>
