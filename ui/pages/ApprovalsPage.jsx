@@ -415,7 +415,8 @@ export default function ApprovalsPage({ active, status, go }) {
     <>
       <PageHeader icon={<NoticeIcon />} title="Approvals" meta={waiting ? `${waiting} waiting` : "nothing waiting"} />
       <PageBody>
-        <div className="page-col">
+        {/* One request at a time, so a narrow centred column: a form, not a list (issue #31). */}
+        <div className="page-wrap narrow">
           <Warnings status={status} go={go} />
           {unlock.req && <UnlockRequest {...unlock} req={unlock.req} onAnswer={unlock.answer} />}
           {req && <FillRequest key={req.request_id} req={req} active={active} />}
@@ -423,13 +424,13 @@ export default function ApprovalsPage({ active, status, go }) {
             <p className="muted small">{moreFills} more request{moreFills === 1 ? "" : "s"} waiting after this one.</p>
           )}
           {!req && !unlock.req && (
-            <div className="empty">
+            <Panel bordered className="card empty">
               <p className="empty-title">Nothing is waiting for you.</p>
               <p className="muted">
                 When a remote browser session needs a password, a code or a card, it appears here and this window comes
                 up on its own. The value goes straight to the service — never to the AI model.
               </p>
-            </div>
+            </Panel>
           )}
         </div>
       </PageBody>

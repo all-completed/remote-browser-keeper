@@ -7,9 +7,12 @@
 // registry's desktop/remote-browser-keeper/) and the service colour, emerald #2BA673.
 import icon from "../src/assets/icon.png";
 
+//
+// No `sub` label (issue #31): "Remote Browser Keeper KEEPER" does not fit the 260px sidebar on
+// one line, so the label wrapped onto a second line and made the brand block 90px tall
+// against the title bar's 56px. The name already says "Keeper".
 export const BRAND = {
   name: "Remote Browser Keeper",
-  sub: "keeper",
   icon,
   color: "#2BA673",
 };

@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
-import { Button, Checkbox, Input, Message, Panel, SelectPicker, Toggle } from "rsuite";
+import { Button, Checkbox, Input, Message, Panel, SelectPicker, Table, Tag, Toggle } from "rsuite";
 import CreditCardIcon from "@rsuite/icons/CreditCardPlus";
-import { ActionMenu, PageBody, PageHeader } from "@f-proj/ui-components";
+import { ActionMenu, PageBody, PageHeader, ResponsiveTable } from "@f-proj/ui-components";
 import { Field } from "../components/Field.jsx";
+import { FilterCount, searchFilter } from "../components/ListFilters.jsx";
+import { filterByQuery } from "../lib/search.js";
+
+const { Column, HeaderCell, Cell } = Table;
 
 // ---- small helpers (ported from cards.js) ----
 const digitsOnly = (v) => String(v == null ? "" : v).replace(/\D/g, "");
@@ -164,115 +168,166 @@ export default function CardsPage() {
   const bad = invalidDomains(domainsText);
   // A select needs a value for "not chosen"; the card keeps "" as before.
   const pick = (v) => v || "";
+
+  // The saved cards as a list to pick from, searchable by name, last 4, holder and the
+  // sites it auto-fills — local, no refetch (issue #31). Never the full number or CVV.
+  const [q, setQ] = useState("");
+  const cardRows = ids.map((id) => {
+    const c = store.cards[id] || {};
+    return { id, last4: last4(c.number), holder: c.holder || "", exp: c.exp_month || c.exp_year ? `${pad2(c.exp_month) || "MM"}/${c.exp_year || "YYYY"}` : "",
+      domains: Array.isArray(c.domains) ? c.domains : [], isDefault: store.default === id };
+  });
+  const visibleCards = filterByQuery(cardRows, q, (r) => [r.id, r.last4, r.holder, r.domains, r.isDefault ? "default" : ""]);
+  const sitesLabel = (d) => (!d.length ? "asks every time" : d.includes("*") ? "every site" : d.length === 1 ? d[0] : `${d[0]} +${d.length - 1}`);
+
   return (
     <>
-      <PageHeader icon={<CreditCardIcon />} title="Cards" meta={`${ids.length} saved`}>
+      <PageHeader
+        icon={<CreditCardIcon />}
+        title="Cards"
+        meta={`${ids.length} saved`}
+        filters={[searchFilter({ value: q, onChange: setQ, placeholder: "Search name, last 4, holder, site…", width: 280 })]}
+      >
         <Button size="sm" onClick={newCard}>+ New</Button>
         <Button size="sm" appearance="primary" onClick={save}>Save</Button>
       </PageHeader>
       <PageBody>
-        <div className="page-col">
-          <p className="muted">Stored locally for unattended card fill. Card values stay on this machine and are never sent to the AI.</p>
+        <div className="page-wrap">
+          <p className="page-intro">Stored locally for unattended card fill. Card values stay on this machine and are never sent to the AI.</p>
 
-          <Toggle checked={store.autofill !== false} onChange={(checked) => { setStore((s) => ({ ...s, autofill: checked })); dirty(); }}>
-            Auto-fill card requests without prompting
-          </Toggle>
-
-          <div className="row">
-            <SelectPicker
-              aria-label="Select card"
-              className="grow"
-              searchable={false}
-              cleanable={false}
-              disabled={none}
-              placeholder="No cards yet"
-              data={ids.map((id) => {
-                const l4 = last4(store.cards[id] && store.cards[id].number);
-                return { value: id, label: id + (l4 ? `  ••••${l4}` : "") + (store.default === id ? "  (default)" : "") };
-              })}
-              value={currentId || null}
-              onChange={(v) => v && setCurrentId(v)}
-            />
-            <ActionMenu
-              actions={[{
-                key: "delete", label: "Delete", color: "red", appearance: "ghost", size: "sm", disabled: none,
-                confirm: { title: "Delete this card?", body: `The card "${currentId || ""}" is removed when you Save.` },
-                onClick: delCard,
-              }]}
-            />
+          <div className="toggle-row">
+            <Toggle checked={store.autofill !== false} onChange={(checked) => { setStore((s) => ({ ...s, autofill: checked })); dirty(); }} />
+            <span>
+              <span className="strong">Auto-fill card requests without prompting</span>
+              <span className="muted small block">On the sites a card lists below; anywhere else you are asked.</span>
+            </span>
           </div>
 
-          {none ? (
-            <Message type="info" showIcon>No cards yet. Click <strong>+ New</strong> to add one.</Message>
-          ) : (
-            <Panel bordered>
-              <form className="form" autoComplete="off" onSubmit={(e) => e.preventDefault()}>
-                <Field label="Name / id">
-                  <Input type="text" placeholder="visa" value={currentId || ""} onChange={(v) => rename(v)} />
-                </Field>
-                <Checkbox checked={store.default === currentId} onChange={(_v, checked) => setDefault(checked)}>Use this card by default</Checkbox>
-                <Field label="Auto-fill on these sites — one per line or comma-separated (silent, no prompt)"
-                  hint="A domain also covers its subdomains (pge.com → account.pge.com). Wildcards ok: * = every site, *.amazon.com = amazon.com + subdomains.">
-                  <Input as="textarea" rows={2} placeholder={"amazon.com\n*.example.com\n*"} value={domainsText}
-                    onChange={(v) => { setDomainsText(v); patchCard({ domains: parseDomains(v) }); }} />
-                  {bad.length > 0 && (
-                    <span className="fld-hint err">Not valid: {bad.join(", ")} — won't be saved.</span>
-                  )}
-                </Field>
-                <Field label="Cardholder">
-                  <Input type="text" placeholder="JOHN Q DOE" value={card.holder || ""} onChange={(v) => patchCard({ holder: v })} />
-                </Field>
+          <div className="split list-editor">
+            <div className="stack">
+              <FilterCount shown={visibleCards.length} total={cardRows.length} onClear={() => setQ("")} />
+              <div className="table-card">
+                <ResponsiveTable
+                  data={visibleCards}
+                  rowKey="id"
+                  autoHeight
+                  wordWrap="break-word"
+                  onRowClick={(r) => setCurrentId(r.id)}
+                  rowClassName={(r) => (r && r.id === currentId ? "row-selected" : "")}
+                  renderEmpty={() => <div className="table-empty muted">{none ? "No cards yet. Click + New to add one." : "No cards match this search."}</div>}
+                >
+                  <Column flexGrow={1} minWidth={130} sortable dataKey="id">
+                    <HeaderCell>Card</HeaderCell>
+                    <Cell>{(r) => (
+                      <div className="cell-stack">
+                        <span className="strong">{r.id}{r.last4 ? <span className="mono muted"> ••••{r.last4}</span> : null}</span>
+                        {r.holder ? <span className="muted small">{r.holder}</span> : null}
+                      </div>
+                    )}</Cell>
+                  </Column>
+                  <Column width={90}>
+                    <HeaderCell>Expires</HeaderCell>
+                    <Cell>{(r) => <span className="mono small">{r.exp || "—"}</span>}</Cell>
+                  </Column>
+                  <Column flexGrow={1} minWidth={130}>
+                    <HeaderCell>Auto-fill on</HeaderCell>
+                    <Cell>{(r) => (
+                      <div className="chips">
+                        {r.isDefault && <Tag size="sm" color="green">default</Tag>}
+                        <span className="small" title={r.domains.join("\n")}>{sitesLabel(r.domains)}</span>
+                      </div>
+                    )}</Cell>
+                  </Column>
+                </ResponsiveTable>
+              </div>
+            </div>
 
-                <Field label="Card number"
-                  hint={!editNum && last4(card.number) ? `Saved card ending ${last4(card.number)} — type to replace` : undefined}>
-                  <Input type="text" inputMode="numeric" maxLength={23} placeholder="#### #### #### ####"
-                    value={editNum ? groupCardNumber(card.number) : ""}
-                    onChange={(v) => { setEditNum(true); patchCard({ number: digitsOnly(v) }); }} />
-                </Field>
-
-                <div className="grid3">
-                  <Field label="Exp month">
-                    <SelectPicker block searchable={false} cleanable={false} placeholder="MM"
-                      data={monthOpts().map((m) => ({ label: m, value: m }))}
-                      value={pad2(card.exp_month) || null} onChange={(v) => patchCard({ exp_month: pick(v) })} />
-                  </Field>
-                  <Field label="Exp year">
-                    <SelectPicker block searchable={false} cleanable={false} placeholder="YYYY"
-                      data={yearOpts(card.exp_year).map((y) => ({ label: y, value: y }))}
-                      value={card.exp_year ? String(card.exp_year) : null} onChange={(v) => patchCard({ exp_year: pick(v) })} />
-                  </Field>
-                  <Field label="CVV" hint={!editCvv && card.cvv ? "Saved — hidden; type to replace" : undefined}>
-                    <Input type="password" inputMode="numeric" maxLength={4} autoComplete="off" placeholder="•••"
-                      value={editCvv ? (card.cvv || "") : ""}
-                      onChange={(v) => { setEditCvv(true); patchCard({ cvv: v }); }} />
-                  </Field>
+            {none ? (
+              <Message type="info" showIcon>No cards yet. Click <strong>+ New</strong> to add one.</Message>
+            ) : (
+              <Panel bordered className="card" header={
+                <div className="row">
+                  <div className="grow">
+                    <div className="card-title">{currentId || "Card"}</div>
+                    <div className="card-sub">Changes are kept when you press Save.</div>
+                  </div>
+                  <ActionMenu
+                    actions={[{
+                      key: "delete", label: "Delete", color: "red", appearance: "ghost", size: "sm", disabled: none,
+                      confirm: { title: "Delete this card?", body: `The card "${currentId || ""}" is removed when you Save.` },
+                      onClick: delCard,
+                    }]}
+                  />
                 </div>
+              }>
+                <form className="form" autoComplete="off" onSubmit={(e) => e.preventDefault()}>
+                  <Field label="Name / id">
+                    <Input type="text" placeholder="visa" value={currentId || ""} onChange={(v) => rename(v)} />
+                  </Field>
+                  <Checkbox checked={store.default === currentId} onChange={(_v, checked) => setDefault(checked)}>Use this card by default</Checkbox>
+                  <Field label="Auto-fill on these sites — one per line or comma-separated (silent, no prompt)"
+                    hint="A domain also covers its subdomains (pge.com → account.pge.com). Wildcards ok: * = every site, *.amazon.com = amazon.com + subdomains.">
+                    <Input as="textarea" rows={2} placeholder={"amazon.com\n*.example.com\n*"} value={domainsText}
+                      onChange={(v) => { setDomainsText(v); patchCard({ domains: parseDomains(v) }); }} />
+                    {bad.length > 0 && (
+                      <span className="fld-hint err">Not valid: {bad.join(", ")} — won't be saved.</span>
+                    )}
+                  </Field>
+                  <Field label="Cardholder">
+                    <Input type="text" placeholder="JOHN Q DOE" value={card.holder || ""} onChange={(v) => patchCard({ holder: v })} />
+                  </Field>
 
-                <fieldset className="billing">
-                  <legend>Billing address</legend>
-                  {BILLING.slice(0, 2).map(([key, label]) => (
-                    <Field label={label} key={key}>
-                      <Input type="text" value={billing[key] || ""} onChange={(v) => patchBilling(key, v)} />
+                  <Field label="Card number"
+                    hint={!editNum && last4(card.number) ? `Saved card ending ${last4(card.number)} — type to replace` : undefined}>
+                    <Input type="text" inputMode="numeric" maxLength={23} placeholder="#### #### #### ####"
+                      value={editNum ? groupCardNumber(card.number) : ""}
+                      onChange={(v) => { setEditNum(true); patchCard({ number: digitsOnly(v) }); }} />
+                  </Field>
+
+                  <div className="grid3">
+                    <Field label="Exp month">
+                      <SelectPicker block searchable={false} cleanable={false} placeholder="MM"
+                        data={monthOpts().map((m) => ({ label: m, value: m }))}
+                        value={pad2(card.exp_month) || null} onChange={(v) => patchCard({ exp_month: pick(v) })} />
                     </Field>
-                  ))}
-                  <div className="grid2">
-                    {BILLING.slice(2, 4).map(([key, label]) => (
+                    <Field label="Exp year">
+                      <SelectPicker block searchable={false} cleanable={false} placeholder="YYYY"
+                        data={yearOpts(card.exp_year).map((y) => ({ label: y, value: y }))}
+                        value={card.exp_year ? String(card.exp_year) : null} onChange={(v) => patchCard({ exp_year: pick(v) })} />
+                    </Field>
+                    <Field label="CVV" hint={!editCvv && card.cvv ? "Saved — hidden; type to replace" : undefined}>
+                      <Input type="password" inputMode="numeric" maxLength={4} autoComplete="off" placeholder="•••"
+                        value={editCvv ? (card.cvv || "") : ""}
+                        onChange={(v) => { setEditCvv(true); patchCard({ cvv: v }); }} />
+                    </Field>
+                  </div>
+
+                  <fieldset className="billing">
+                    <legend>Billing address</legend>
+                    {BILLING.slice(0, 2).map(([key, label]) => (
                       <Field label={label} key={key}>
                         <Input type="text" value={billing[key] || ""} onChange={(v) => patchBilling(key, v)} />
                       </Field>
                     ))}
-                  </div>
-                  <div className="grid2">
-                    {BILLING.slice(4, 6).map(([key, label]) => (
-                      <Field label={label} key={key}>
-                        <Input type="text" placeholder={key === "country" ? "US" : undefined} value={billing[key] || ""} onChange={(v) => patchBilling(key, v)} />
-                      </Field>
-                    ))}
-                  </div>
-                </fieldset>
-              </form>
-            </Panel>
-          )}
+                    <div className="grid2">
+                      {BILLING.slice(2, 4).map(([key, label]) => (
+                        <Field label={label} key={key}>
+                          <Input type="text" value={billing[key] || ""} onChange={(v) => patchBilling(key, v)} />
+                        </Field>
+                      ))}
+                    </div>
+                    <div className="grid2">
+                      {BILLING.slice(4, 6).map(([key, label]) => (
+                        <Field label={label} key={key}>
+                          <Input type="text" placeholder={key === "country" ? "US" : undefined} value={billing[key] || ""} onChange={(v) => patchBilling(key, v)} />
+                        </Field>
+                      ))}
+                    </div>
+                  </fieldset>
+                </form>
+              </Panel>
+            )}
+          </div>
 
           {note && <Message type={note.ok ? "success" : "warning"} showIcon>{note.text}</Message>}
 

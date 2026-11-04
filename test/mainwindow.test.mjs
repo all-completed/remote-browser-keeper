@@ -10,7 +10,8 @@
 //   - closing the window hides it, and declines the request on screen (the old prompt
 //     window's close);
 //   - a request that never reaches the screen is still a named UI failure;
-//   - IPC from anything but the window's own top-level document is refused.
+//   - IPC from anything but the window's own top-level document is refused;
+//   - a first launch opens the window maximized, applied only when it is shown (issue #31).
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -87,9 +88,11 @@ test("a fill request brings up ONE window — hidden until the request is on scr
   assert.equal(sentTo(win, "keeper:request")[0].request_id, "r1", "pushed on load");
   assert.equal((await invoke("keeper:pending-request", win)).request_id, "r1", "and pullable");
   assert.equal(win.isVisible(), false, "still hidden: nothing on screen yet");
+  assert.equal(win.isMaximized(), false, "not maximized while hidden: Electron's maximize() would show it (issue #31)");
 
   send("keeper:prompt-rendered", win, { request_id: "r1" });
   assert.equal(win.isVisible(), true, "shown once the request is painted");
+  assert.equal(win.isMaximized(), true, "a first launch (no window.json) opens maximized (issue #31)");
   assert.equal(win.alwaysOnTop, "screen-saver", "over everything, like the prompt window was");
   assert.equal(fake.beeps, 1);
   assert.equal(fake.dock.at(-1), "show");

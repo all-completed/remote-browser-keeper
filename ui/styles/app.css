@@ -8,8 +8,87 @@
 body { -webkit-user-select: none; user-select: none; }
 input, textarea, code, .revealed, .selectable { -webkit-user-select: text; user-select: text; }
 
-.page-col { display: flex; flex-direction: column; gap: 14px; max-width: 760px; padding: 16px 0 32px; }
-.page-col.narrow { max-width: 460px; }
+/* ── Shell alignment (issue #31) ───────────────────────────────────────────────
+   The sidebar's brand block and the page's title bar are one band across the window: both
+   exactly the title bar's 56px (ui-components' `.page-title` min-height), and one divider
+   under the bar at the brand block's bottom edge. Left alone, the block is 20px padding
+   around its content, and a name as long as ours wraps the sub-label onto a second line
+   (90px vs 56px). Desktop sidebar only: the phone / drawer brand row lines up with the
+   burger by its own rules in ui-components. */
+:root { --keeper-bar-height: 56px; }
+.app-sidebar-desktop .app-brand-block {
+  box-sizing: border-box;
+  height: var(--keeper-bar-height);
+  padding-top: 0;
+  padding-bottom: 0;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.app-sidebar-desktop .app-brand-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.page-header-desktop .page-title { min-height: var(--keeper-bar-height); }
+/* An inset line, not a border: it is drawn inside the 56px, so the bar stays exactly the
+   brand block's height and the line sits on the block's bottom edge. */
+.page-header .rs-navbar { box-shadow: inset 0 -1px 0 var(--rs-border-secondary, var(--app-color-border-soft)); }
+
+/* ── Page layout (issue #31) ──────────────────────────────────────────────────
+   One centred column per page: it fills the content area up to a maximum and is centred
+   beyond it, so a maximized window has no content stuck to one side. 1680px is what a
+   maximized 1920px screen gives the content (1920 − 260 sidebar − 2×20 gutter), so there
+   the column runs edge to edge under the title bar; only a larger monitor centres it. `narrow` is for a single form or request.
+   A container, so the grids below follow the column's width — the sidebar collapsing to
+   its rail widens them, a narrow window stacks them — rather than the window's. */
+.page-wrap {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  container-type: inline-size;
+}
+.page-wrap.narrow { max-width: 880px; }
+.page-intro { color: var(--app-color-text-muted); max-width: 820px; }
+
+/* Cards side by side while each gets at least 340px, one column below that. auto-FIT, not
+   auto-fill: the cards there are share the whole row, instead of empty tracks to their
+   right — the "content stuck to one side" this layout exists to remove. */
+.card-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
+/* A main section beside a narrower aside (a list beside its editor or "add" form). */
+.split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@container (min-width: 980px) {
+  .split { grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); }
+  /* A list beside the editor of the row picked in it (Cards). */
+  .split.list-editor { grid-template-columns: minmax(320px, 2fr) minmax(0, 3fr); }
+}
+/* Two equal cards (Pair phone, Vault password): side by side as soon as each gets ~320px. */
+@container (min-width: 660px) {
+  .split.even { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.card .rs-panel-header { padding-bottom: 8px; }
+.card-title { font-size: 15px; font-weight: 600; color: var(--app-color-text); }
+.card-sub { font-size: 12.5px; color: var(--app-color-text-muted); font-weight: 400; margin-top: 2px; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+
+/* Tables (ui-components ResponsiveTable): the grid on its own bordered surface, rows that
+   grow to their content (wordWrap), cells vertically centred. */
+.table-card { border: 1px solid var(--app-color-border); border-radius: 8px; overflow: hidden; }
+.table-card .rs-table { background: transparent; }
+/* On the phone branch ResponsiveTable is already a stack of bordered cards: no frame around them. */
+.page-body-mobile .table-card { border: 0; border-radius: 0; overflow: visible; }
+.table-card .rs-table-cell-content { display: flex; align-items: center; }
+.cell-stack { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cell-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.filter-count { display: flex; align-items: center; gap: 10px; }
+.link-button { background: none; border: 0; padding: 0; color: var(--rs-text-link, var(--app-color-accent)); cursor: pointer; font: inherit; }
+.link-button:hover { text-decoration: underline; }
+/* The row whose card is open in the editor (Cards): tinted with the accent, so it is told
+   apart from the plain hover rsuite and ResponsiveTable already paint. */
+.table-card .rs-table-row.row-selected .rs-table-cell,
+.table-card .rs-table-row.row-selected .rs-table-cell-group {
+  background-color: color-mix(in srgb, var(--app-color-accent) 16%, var(--rs-bg-card, var(--app-color-ground)));
+}
 .muted { color: var(--app-color-text-muted); }
 .small { font-size: 12px; }
 .block { display: block; }
@@ -24,16 +103,13 @@ p { margin: 0; }
 .row { display: flex; align-items: center; gap: 10px; }
 .chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .chips .rs-tag { margin-left: 0; }
-.list { display: flex; flex-direction: column; gap: 10px; }
-.entry .rs-panel-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
 .kv { font-size: 13px; color: var(--app-color-text-secondary); word-break: break-word; }
 .revealed { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .revealed code { word-break: break-all; background: var(--app-color-pressed); padding: 2px 6px; border-radius: 5px; }
 .badge-src { opacity: 0.75; }
-.shot img { max-width: 100%; border-radius: 6px; cursor: zoom-in; border: 1px solid var(--app-color-border); }
-.shot { margin: 0; }
 
-.empty { padding: 28px 4px; }
+.empty { text-align: center; }
+.empty .rs-panel-body { padding: 28px 20px; }
 .empty-title { font-size: 15px; color: var(--app-color-text); margin-bottom: 6px; }
 
 /* A request waiting for the user (fill or headless unlock). */
@@ -97,3 +173,7 @@ p { margin: 0; }
 @media (max-width: 560px) {
   .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Numbered / bulleted how-to inside a card (Pair phone, Vault password). */
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; color: var(--app-color-text-secondary); }
+.table-empty { padding: 24px 16px; text-align: center; }

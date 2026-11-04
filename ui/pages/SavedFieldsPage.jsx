@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
-import { Button, Panel, Tag } from "rsuite";
+import { Button, Table, Tag } from "rsuite";
 import StorageIcon from "@rsuite/icons/Storage";
-import { ActionMenu, CopyButton, PageBody, PageHeader } from "@f-proj/ui-components";
+import ReloadIcon from "@rsuite/icons/Reload";
+import { ActionMenu, CopyButton, PageBody, PageHeader, ResponsiveTable } from "@f-proj/ui-components";
 import { relTime, absTime } from "../lib/format.js";
+import { distinctValues, filterByQuery } from "../lib/search.js";
+import { FilterCount, pickerFilter, searchFilter } from "../components/ListFilters.jsx";
+
+const { Column, HeaderCell, Cell } = Table;
+
+const scopeLabel = (e) => (e.scope === "vault" ? "vault · synced" : e.scope === "forever" ? "saved securely" : "until restart");
+const SESSIONLESS = "—"; // a value saved for the site, not for one session
 
 // Lists field values the user saved on this machine and lets them forget any (or all).
 // Only metadata is shown — the value itself is encrypted at rest and shown only when the
@@ -11,16 +19,22 @@ export default function SavedFieldsPage() {
   const [items, setItems] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [shown, setShown] = useState({}); // entryKey -> revealed value (in-memory only)
-  // Click a host/session chip to narrow the list — local to this page, no refetch.
+  // Search and site/session filters — local to this page, no refetch (issue #31). A row's
+  // site/session chip sets the same filter as the picker.
+  const [q, setQ] = useState("");
   const [filter, setFilter] = useState({ session: null, host: null });
   const onFilter = (key, value) => setFilter((f) => ({ ...f, [key]: value }));
-  const activeFilter = filter.session !== null || filter.host !== null;
-  const visible = items.filter((e) => (
-    (filter.session === null || (e.session || "") === filter.session)
-    && (filter.host === null || e.host === filter.host)
-  ));
+  const clearAll = () => { setQ(""); setFilter({ session: null, host: null }); };
 
   const keyOf = (e) => (e.session || "") + "|" + e.host + "|" + e.selector;
+  const rows = items.map((e, i) => ({ ...e, _key: keyOf(e) + "|" + i }));
+  const narrowed = rows.filter((e) => (
+    (filter.session === null || (e.session || SESSIONLESS) === filter.session)
+    && (filter.host === null || e.host === filter.host)
+  ));
+  // Never the revealed value: search covers metadata only.
+  const visible = filterByQuery(narrowed, q, (e) => [e.host, e.session, e.selector, scopeLabel(e), e.auto ? "auto-fill" : ""]);
+
   // Reveal (or hide) a single saved value on demand — useful for reading a generated
   // password you never saw. The value is fetched only when asked and kept in memory.
   const toggleReveal = async (e) => {
@@ -47,8 +61,19 @@ export default function SavedFieldsPage() {
 
   return (
     <>
-      <PageHeader icon={<StorageIcon />} title="Saved fields" meta={`${items.length} saved`}>
-        <Button size="sm" onClick={refresh}>Refresh</Button>
+      <PageHeader
+        icon={<StorageIcon />}
+        title="Saved fields"
+        meta={`${items.length} saved`}
+        actions={[{ key: "refresh", label: "Refresh", icon: <ReloadIcon />, onClick: refresh }]}
+        filters={[
+          searchFilter({ value: q, onChange: setQ, placeholder: "Search site, session, selector…", width: 280 }),
+          pickerFilter({ key: "host", label: "Site", value: filter.host, onChange: (v) => onFilter("host", v),
+            options: distinctValues(items, (e) => e.host), placeholder: "All sites", width: 220 }),
+          pickerFilter({ key: "session", label: "Session", value: filter.session, onChange: (v) => onFilter("session", v),
+            options: distinctValues(items, (e) => e.session || SESSIONLESS), placeholder: "All sessions", width: 180, mono: true }),
+        ]}
+      >
         {items.length > 0 && (
           <ActionMenu actions={[{
             key: "forget-all", label: "Forget all", color: "red", appearance: "ghost", size: "sm",
@@ -61,32 +86,75 @@ export default function SavedFieldsPage() {
         )}
       </PageHeader>
       <PageBody>
-        <div className="page-col">
-          <p className="muted">Values you chose to keep. Encrypted at rest and never sent to the AI; shown only when you press <b>Reveal</b>.</p>
-
-          {activeFilter && (
-            <div className="chips">
-              <span className="muted">Filtered by</span>
-              {filter.host !== null && <Tag size="sm" color="blue">{filter.host}</Tag>}
-              {filter.session !== null && <Tag size="sm" color="blue">session: {filter.session || "—"}</Tag>}
-              <Button size="xs" appearance="link" onClick={() => setFilter({ session: null, host: null })}>Clear</Button>
-              <span className="muted small push">{visible.length} of {items.length}</span>
-            </div>
-          )}
-          {loaded && items.length === 0 ? (
-            <p className="empty-title">No saved fields.</p>
-          ) : visible.length === 0 ? (
-            <p className="empty-title">{loaded ? "No saved fields match this filter." : "…"}</p>
-          ) : (
-            <div className="list">
-              {visible.map((e, i) => (
-                <Panel bordered className="entry" key={keyOf(e) + "|" + i}>
+        <div className="page-wrap">
+          <p className="page-intro">Values you chose to keep. Encrypted at rest and never sent to the AI; shown only when you press <b>Reveal</b>.</p>
+          <FilterCount shown={visible.length} total={items.length} onClear={clearAll} />
+          <div className="table-card">
+            <ResponsiveTable
+              data={visible}
+              rowKey="_key"
+              autoHeight
+              wordWrap="break-word"
+              loading={!loaded}
+              renderEmpty={() => <div className="table-empty muted">{items.length === 0 ? "No saved fields." : "No saved fields match this search."}</div>}
+            >
+              <Column flexGrow={2} minWidth={200} sortable dataKey="host">
+                <HeaderCell>Site</HeaderCell>
+                <Cell>{(e) => (
+                  <Button
+                    size="xs"
+                    appearance={filter.host === e.host ? "primary" : "ghost"}
+                    title={filter.host === e.host ? "Clear this filter" : `Show only ${e.host}`}
+                    onClick={() => onFilter("host", filter.host === e.host ? null : e.host)}
+                  >{e.host}</Button>
+                )}</Cell>
+              </Column>
+              <Column width={160} sortable dataKey="session" sortValue={(e) => e.session || null}>
+                <HeaderCell>Session</HeaderCell>
+                <Cell>{(e) => {
+                  const s = e.session || SESSIONLESS;
+                  return (
+                    <Button
+                      size="xs"
+                      className="mono"
+                      appearance={filter.session === s ? "primary" : "ghost"}
+                      title={filter.session === s ? "Clear this filter" : `Show only session ${s}`}
+                      onClick={() => onFilter("session", filter.session === s ? null : s)}
+                    >{s}</Button>
+                  );
+                }}</Cell>
+              </Column>
+              <Column flexGrow={2} minWidth={180} mobileFull>
+                <HeaderCell>Field</HeaderCell>
+                <Cell>{(e) => (
+                  <div className="cell-stack">
+                    <span className="mono small wrap">{e.selector}</span>
+                    {shown[keyOf(e)] != null && (
+                      <span className="revealed">
+                        <code className="mono">{shown[keyOf(e)]}</code>
+                        <CopyButton text={shown[keyOf(e)]} label="Copy value" />
+                      </span>
+                    )}
+                  </div>
+                )}</Cell>
+              </Column>
+              <Column width={190}>
+                <HeaderCell>Stored</HeaderCell>
+                <Cell>{(e) => (
                   <div className="chips">
-                    <Tag size="sm" color={e.scope === "session" ? "orange" : "green"}>
-                      {e.scope === "vault" ? "vault · synced" : e.scope === "forever" ? "saved securely" : "until restart"}
-                    </Tag>
+                    <Tag size="sm" color={e.scope === "session" ? "orange" : "green"}>{scopeLabel(e)}</Tag>
                     {e.auto && <Tag size="sm">auto-fill</Tag>}
-                    <span className="push" />
+                  </div>
+                )}</Cell>
+              </Column>
+              <Column width={110} sortable dataKey="updated_at" sortValue={(e) => (e.updated_at ? new Date(e.updated_at).getTime() : null)}>
+                <HeaderCell>Updated</HeaderCell>
+                <Cell>{(e) => (e.updated_at ? <span className="muted small" title={absTime(e.updated_at)}>{relTime(e.updated_at)}</span> : <span className="muted">—</span>)}</Cell>
+              </Column>
+              <Column width={170} mobileLabel="Actions">
+                <HeaderCell>{""}</HeaderCell>
+                <Cell>{(e) => (
+                  <div className="cell-actions">
                     <Button size="xs" onClick={() => toggleReveal(e)}>{shown[keyOf(e)] != null ? "Hide" : "Reveal"}</Button>
                     <ActionMenu actions={[{
                       key: "forget", label: "Forget", size: "xs", color: "red", appearance: "ghost",
@@ -94,34 +162,10 @@ export default function SavedFieldsPage() {
                       onClick: () => forgetOne(e),
                     }]} />
                   </div>
-                  <div className="chips">
-                    <Button
-                      size="xs"
-                      appearance={filter.host === e.host ? "primary" : "ghost"}
-                      title={filter.host === e.host ? "Clear this filter" : `Show only ${e.host}`}
-                      onClick={() => onFilter("host", filter.host === e.host ? null : e.host)}
-                    >{e.host}</Button>
-                    <Button
-                      size="xs"
-                      className="mono"
-                      appearance={filter.session === (e.session || "") ? "primary" : "ghost"}
-                      title={filter.session === (e.session || "") ? "Clear this filter" : `Show only session ${e.session || "—"}`}
-                      onClick={() => onFilter("session", filter.session === (e.session || "") ? null : (e.session || ""))}
-                    >session: {e.session || "—"}</Button>
-                    {e.updated_at && <span className="muted small" title={absTime(e.updated_at)}>{relTime(e.updated_at)}</span>}
-                  </div>
-                  <div className="kv"><span className="muted">selector: </span><span className="mono">{e.selector}</span></div>
-                  {shown[keyOf(e)] != null && (
-                    <div className="kv revealed">
-                      <span className="muted">value: </span>
-                      <code className="mono">{shown[keyOf(e)]}</code>
-                      <CopyButton text={shown[keyOf(e)]} label="Copy value" />
-                    </div>
-                  )}
-                </Panel>
-              ))}
-            </div>
-          )}
+                )}</Cell>
+              </Column>
+            </ResponsiveTable>
+          </div>
         </div>
       </PageBody>
     </>
