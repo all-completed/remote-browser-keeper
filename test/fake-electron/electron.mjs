@@ -38,7 +38,9 @@ export class BrowserWindow extends EventEmitter {
     this.destroyed = false;
     this.alwaysOnTop = false;
     this.minimized = false;
+    this.fullScreen = false;
     this.contentProtection = false;
+    this.calls = []; // every show / focus / restore / maximize, in order — what put it on screen
     this.webContents = new WebContents(this);
     fake.windows.push(this);
     fake.appEvents.emit("browser-window-created", {}, this);
@@ -55,14 +57,17 @@ export class BrowserWindow extends EventEmitter {
     this.webContents.emit("did-finish-load");
     this.emit("ready-to-show");
   }
-  show() { this.visible = true; this.minimized = false; }
+  show() { this.calls.push("show"); this.visible = true; this.minimized = false; }
   hide() { this.visible = false; }
-  focus() {}
-  restore() { this.minimized = false; }
+  focus() { this.calls.push("focus"); }
+  restore() { this.calls.push("restore"); this.minimized = false; }
+  minimize() { this.minimized = true; }
+  setFullScreen(v) { this.fullScreen = !!v; }
+  isFullScreen() { return this.fullScreen; }
   // As Electron's: "This will also show (but not focus) the window if it isn't being
   // displayed already" — so a window maximized at creation would be on screen before it
   // painted (issue #31).
-  maximize() { this.maximized = true; this.visible = true; this.minimized = false; }
+  maximize() { this.calls.push("maximize"); this.maximized = true; this.visible = true; this.minimized = false; }
   center() {}
   isVisible() { return this.visible; }
   isMinimized() { return this.minimized; }

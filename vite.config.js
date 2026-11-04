@@ -5,21 +5,21 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// ONE HTML entry, for the ONE Electron window (issue #28). Built to ../renderer-dist;
-// loaded by main.js. base: './' so the built assets resolve under file:// (Electron loadFile).
+// Two HTML entries, one per Electron window: the main window (issue #28) and the small
+// approval window (issue #34). Built to ../renderer-dist; loaded by main.js. base: './' so the built assets resolve under file:// (Electron loadFile).
 export default defineConfig({
   root: 'ui',
   base: './',
   plugins: [react()],
   build: {
     outDir: '../renderer-dist',
-    // One bundle for the whole window (rsuite + the shell), loaded from disk: no network
-    // to split it for.
+    // Loaded from disk: no network to split the bundles for.
     chunkSizeWarningLimit: 1500,
     emptyOutDir: true,
     rollupOptions: {
       input: {
         app: resolve(__dirname, 'ui/app.html'),
+        approval: resolve(__dirname, 'ui/approval.html'),
       },
     },
   },

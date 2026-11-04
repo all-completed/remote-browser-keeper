@@ -24,3 +24,5 @@ export function subscribePage(fn) { pageSubs.add(fn); return () => pageSubs.dele
 export function subscribeStatus(fn) { statusSubs.add(fn); if (status) fn(status); return () => statusSubs.delete(fn); }
 export function reportPage(p) { try { k && k.page && k.page(p); } catch { /* ignore */ } }
 export function dismiss(what) { try { k && k.dismiss && k.dismiss(what); } catch { /* ignore */ } }
+// The Approvals page's "Show approval window" (issue #34). Main window only.
+export function showApproval() { try { k && k.showApproval && k.showApproval(); } catch { /* ignore */ } }

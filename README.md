@@ -10,6 +10,10 @@ sidebar shell as Getway Chat and the other f-proj apps — the shared
 rsuite. The tray / menu-bar icon opens it on any page; closing it hides it and the
 Keeper keeps running in the tray.
 
+The one exception is the **approval prompt** (issue #34): a request waiting for you — a
+fill request, or a headless Keeper asking to be unlocked — comes up in a **small window of
+its own**, in the same look, and the main window is never shown, raised or focused for it.
+
 ## Documentation
 
 - [docs/file-structure.md](docs/file-structure.md) — source tree, window/IPC
@@ -63,10 +67,11 @@ out of band: `you → keeper → service → form`. The model's path is only
 2. Agent calls `POST /api/sessions/{id}/request-fill` with `{selector, label, field}`
    (no value). Service registers a pending request and pushes `fill_request` to the
    user's connected Keeper(s).
-3. Keeper brings its window up, over everything, on the **Approvals** page: the label
-   (e.g. *"Password for web.telegram.org"*) and a masked input. User submits (or
-   cancels — closing the window also declines). A window that a request brought up goes
-   away again once nothing is waiting.
+3. Keeper brings up its small **approval window**, over everything (the main window stays
+   where it is): the label (e.g. *"Password for web.telegram.org"*) and a masked input.
+   User submits (or cancels — closing the approval window also declines). Requests that
+   arrive together are asked one after another in the same window ("N more waiting");
+   it closes once nothing is waiting.
 4. Keeper sends `fill_response {request_id, value}` back over the WS. The service
    fills the field via CDP using `fill` semantics, **discards the value**, and
    returns `{request_id, status:"filled"}` to the agent.
@@ -245,17 +250,18 @@ Config: `RBS_URL` (your service base URL, e.g. `https://rb.example.com`),
 
 ### If an approval doesn't appear
 
-A window that a request brings up is kept hidden until its renderer reports the request
-is painted on the Approvals page, so a page that can't render is reported instead of
-shown blank:
+The approval window is kept hidden until its renderer reports the request is painted, so a
+window that can't render is reported instead of shown blank:
 
 - the menu-bar icon shows **⚠︎** and the tray menu names the failure (click it to dismiss;
-  the Approvals page shows it too);
+  the main window's Approvals page shows it too);
 - the log line is `[keeper] approval window failed to render: <cause>` (run `npm start`
   from a terminal, or `open -a "Remote Browser Keeper"` from one, to see it);
 - the request is answered with `error: "keeper_ui_failed"` instead of being left hanging,
   and it appears in **History** with the outcome `ui_failed`;
-- requests still waiting for you are listed in the tray menu under **Waiting for you**.
+- requests still waiting for you are listed in the tray menu under **Waiting for you**;
+  clicking one (or **Show approval window** on the Approvals page) brings the approval
+  window back.
 
 Two diagnostic switches, both off by default:
 
@@ -269,9 +275,9 @@ Two diagnostic switches, both off by default:
 Full layout — source tree, window/IPC, and the on-disk data store — is in
 [docs/file-structure.md](docs/file-structure.md). In short:
 
-- `src/main.js` — main process: tray, keeper WS client (reconnect), the one window
-  (pages, the approval queue on screen, render supervision), IPC, and per-URL history
-  storage
+- `src/main.js` — main process: tray, keeper WS client (reconnect), the main window
+  (pages), the approval window (the queue on screen, render supervision), IPC, and per-URL
+  history storage
 - `src/windowstate.js` — the window's remembered size/position (ported from Getway Chat)
 - `src/config.js` — base URL + API key resolution
 - `src/outbox.js` — answers the socket could not take: held, re-sent on reconnect,

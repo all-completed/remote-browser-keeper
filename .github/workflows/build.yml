@@ -87,9 +87,11 @@ jobs:
         shell: bash
         run: |
           npm run build:ui
-          # The one window's document, and the shared library actually in it (issue #28):
-          # not merely listed in package.json.
+          # Both windows' documents — the main window (issue #28) and the approval window
+          # (issue #34) — and the shared library actually in them: not merely listed in
+          # package.json.
           test -s renderer-dist/app.html
+          test -s renderer-dist/approval.html
           grep -q "app-shell" renderer-dist/assets/*.css || {
             echo "the built CSS carries no @f-proj/ui-components rules" >&2; exit 1; }
 
