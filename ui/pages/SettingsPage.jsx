@@ -46,8 +46,8 @@ function Row({ label, children, mono }) {
 // there the id IS the key, see src/vault.js).
 //
 // The vault's own password is a section of this page (issue #36; it was the Vault
-// password page): `section` "vault-password" — what the `vaultpw` target, the tray's
-// "Set vault password…" and the legacy-key links open — scrolls it into view and puts the
+// password page): `section` "vault-password" — what the old `vaultpw` key, the tray's
+// legacy-v1 warning and the legacy-key links open — scrolls it into view and puts the
 // caret in its first field. `sectionSeq` changes on every navigation, so asking again
 // while already here scrolls again.
 export default function SettingsPage({ go, section, sectionSeq }) {

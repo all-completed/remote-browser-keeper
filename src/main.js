@@ -2056,8 +2056,8 @@ function updateTray() {
     { label: "History…", click: () => openPage("history") },
     { type: "separator" },
     { label: "Pair phone…", click: () => openPage("pair") },
-    { label: "Set vault password…", click: () => openPage("settings#vault-password") },
     { label: "Headless Keepers…", click: () => openPage("headless") },
+    // One Settings entry: the vault's own password is a section of it (issue #36).
     { label: "Settings…", click: () => openPage("settings") },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     // A device left on the v1 key model is a real exposure (v1's stored id IS the key),

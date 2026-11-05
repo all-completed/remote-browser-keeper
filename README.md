@@ -122,7 +122,7 @@ from outside:
 | `ok` | on a v2 key model, vault readable | — |
 | `no_key` | this device holds no vault key (never paired, or cleared) | pair it |
 | `needs_repair` | a vault exists but this device can't decrypt it (`VaultKeyMismatch`) | re-pair it |
-| `legacy_v1` | still on legacy `aesgcm-sha256-v1` | **migrate** — Set vault password… |
+| `legacy_v1` | still on legacy `aesgcm-sha256-v1` | **migrate** — Settings… → Vault password |
 
 `secret_id` is the opaque, domain-separated id of the vault this device can open
 (`sha256("rbvault-id-v2" ‖ master)`), so it is safe to publish and lets the service group
