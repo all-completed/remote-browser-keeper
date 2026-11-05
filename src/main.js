@@ -760,7 +760,7 @@ function tryAutofillCard(req) {
 
 // ---------- The main window (issue #28) ----------
 // The Keeper is ONE window. Every surface that used to be a window of its own — History,
-// Cards, Saved fields, Headless Keepers, Pair phone, Vault password, Settings, the
+// Cards, Saved fields, Headless Keepers, Pair phone, Settings (with the vault password), the
 // full-size screenshot — is a page or an in-app viewer inside it (ui/App.jsx). Main tells
 // the renderer which page to show (app:navigate); the renderer tells main when the user
 // moves (app:page). Closing the window hides it: the Keeper keeps running in the tray/menu
@@ -769,7 +769,18 @@ function tryAutofillCard(req) {
 // The ONE exception (issue #34): a request waiting for the user — a fill request or a
 // headless Keeper asking to be unlocked — is answered in the small approval window below,
 // never here. A request never shows, raises or focuses this window.
-const PAGES = new Set(["approvals", "history", "cards", "savedfields", "headless", "pair", "vaultpw", "settings"]);
+const PAGES = new Set(["approvals", "history", "cards", "savedfields", "headless", "pair", "settings"]);
+// A page may also be opened at a section: `page#section` (ui/lib/nav.js PAGE_SECTIONS). The
+// Vault password page is Settings' vault-password section now (issue #36); its old key
+// `vaultpw` is still accepted from any caller and lands there.
+const PAGE_SECTIONS = new Set(["settings#vault-password"]);
+const PAGE_ALIASES = new Map([["vaultpw", "settings#vault-password"]]);
+// What `page` asks the window to show, as main keeps and sends it — or null for no page.
+function pageTarget(page) {
+  if (typeof page !== "string") return null;
+  const target = PAGE_ALIASES.get(page) || page;
+  return PAGES.has(target) || PAGE_SECTIONS.has(target) ? target : null;
+}
 // The app icon for the window/taskbar on Windows and Linux (macOS takes the bundle's).
 const APP_ICON = path.join(__dirname, "assets", "icon.png");
 let mainWin = null;
@@ -887,9 +898,10 @@ function revealMainWindow() {
 }
 
 function navigateTo(page) {
-  if (!PAGES.has(page)) return;
-  currentPage = page;
-  if (mainWin && mainLoaded) { try { mainWin.webContents.send("app:navigate", page); } catch { /* pulled on mount */ } }
+  const target = pageTarget(page);
+  if (!target) return;
+  currentPage = target;
+  if (mainWin && mainLoaded) { try { mainWin.webContents.send("app:navigate", target); } catch { /* pulled on mount */ } }
 }
 
 // Tray → a page of the one window.
@@ -1094,8 +1106,9 @@ ipcMain.handle("app:state", (e) => {
 // The user moved to another page in the sidebar. Remembered so a reload lands on it.
 ipcMain.on("app:page", (e, page) => {
   if (!fromWindow(e, "app:page", mainWin)) return;
-  if (!PAGES.has(page)) return;
-  currentPage = page;
+  const target = pageTarget(page);
+  if (!target) return;
+  currentPage = target;
 });
 // The Approvals page's "Show" — bring the approval window back up for what is waiting
 // (after the user closed it on an unlock request, or it got lost behind something).
@@ -1770,7 +1783,7 @@ ipcMain.handle("pair:qr", async (e) => {
 // password, and whether this device is out of sync (needs re-pair).
 ipcMain.handle("keeper:vault-status", (e) => {
   // Two windows ask this one: the approval window (to default a generated password to the
-  // vault) and the main window's Vault password page.
+  // vault) and the main window's Settings page (its vault-password section).
   if (!fromWindow(e, "keeper:vault-status", mainWin, approvalWin)) return { ok: false };
   try {
     const { baseUrl } = loadConfig();
@@ -2043,13 +2056,13 @@ function updateTray() {
     { label: "History…", click: () => openPage("history") },
     { type: "separator" },
     { label: "Pair phone…", click: () => openPage("pair") },
-    { label: "Set vault password…", click: () => openPage("vaultpw") },
+    { label: "Set vault password…", click: () => openPage("settings#vault-password") },
     { label: "Headless Keepers…", click: () => openPage("headless") },
     { label: "Settings…", click: () => openPage("settings") },
     ...(vaultNeedsRepair ? [{ label: "⚠︎ Vault: re-pair to update password", enabled: false }] : []),
     // A device left on the v1 key model is a real exposure (v1's stored id IS the key),
     // so name it in the menu bar. Setting a vault password re-encrypts onto v2.
-    ...(vaultLegacyKey ? [{ label: "⚠︎ Vault: legacy v1 key — set a vault password to migrate", click: () => openPage("vaultpw") }] : []),
+    ...(vaultLegacyKey ? [{ label: "⚠︎ Vault: legacy v1 key — set a vault password to migrate", click: () => openPage("settings#vault-password") }] : []),
     { type: "separator" },
     { label: "Quit", click: () => { app.isQuitting = true; app.quit(); } },
   ]));

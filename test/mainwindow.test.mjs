@@ -49,6 +49,8 @@ const wait = (ms) => new Promise((r) => realSetTimeout(r, ms));
 // rather than racing it with a timer: under a loaded test run a 5 ms timer can fire first.
 const settle = async () => { await new Promise((r) => setImmediate(r)); await wait(1); };
 
+import { resolveTarget } from "../ui/lib/nav.js";
+
 register("./fake-electron/hooks.mjs", import.meta.url);
 const { fake, ipcEvent, BrowserWindow } = await import("./fake-electron/electron.mjs");
 fake.home = HOME;
@@ -81,7 +83,7 @@ test("launch: a tray app with no window yet, and a tray entry for every page", (
   assert.equal(fake.trays.length, 1);
   assert.equal(fake.dock[0], "hide", "no dock icon while there is no window");
   for (const label of ["Open Remote Browser Keeper", "Cards…", "Saved fields…", "History…", "Pair phone…",
-    "Set vault password…", "Headless Keepers…", "Settings…", "Quit"]) {
+    "Set vault password…", "Headless Keepers…", "Settings…", "Quit"]) { // "Set vault password…" opens Settings (issue #36)
     assert.ok(trayItem(label), `tray has "${label}"`);
   }
   sock().open();
@@ -182,6 +184,30 @@ test("every tray page opens in the same main window", async () => {
   // …and only real pages are.
   send("app:page", win, "../../etc/passwd");
   assert.equal((await invoke("app:state", win)).page, "savedfields");
+});
+
+test("the Vault password page is a section of Settings: the tray, an old `vaultpw` caller and the renderer all land there (issue #36)", async () => {
+  const win = mainWindow();
+  // Every target main sends is one the renderer can show (ui/lib/nav.js).
+  const lands = (target) => resolveTarget(target);
+  trayItem("Set vault password…").click();
+  assert.equal(win.isVisible(), true);
+  assert.equal(sentTo(win, "app:navigate").at(-1), "settings#vault-password");
+  assert.deepEqual(lands(sentTo(win, "app:navigate").at(-1)), { page: "settings", section: "vault-password" });
+  assert.equal((await invoke("app:state", win)).page, "settings#vault-password", "a reload lands on the section too");
+  trayItem("Settings…").click();
+  assert.deepEqual(lands(sentTo(win, "app:navigate").at(-1)), { page: "settings", section: null });
+  // An old caller still asking for the retired page key gets the section, not nothing.
+  send("app:page", win, "vaultpw");
+  assert.equal((await invoke("app:state", win)).page, "settings#vault-password");
+  // A section Settings doesn't have, or one on another page, is not a page.
+  send("app:page", win, "history");
+  for (const bad of ["settings#nope", "pair#vault-password", "vaultpw#vault-password", "settings#", "#vault-password"]) {
+    send("app:page", win, bad);
+    assert.equal((await invoke("app:state", win)).page, "history", bad);
+    assert.equal(lands(bad), null, `the renderer refuses ${bad} too`);
+  }
+  assert.equal(fake.windows.filter(isMain).length, 1, "still one main window");
 });
 
 test("several requests at once: one at a time in the same approval window, none dropped", async () => {

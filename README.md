@@ -4,7 +4,8 @@ A small **tray-resident Electron app** that supplies passwords/logins to remote
 browser sessions **without the value ever reaching the AI model**.
 
 It is **one window** (issue #28): Approvals, History, Cards, Saved fields, Headless
-Keepers, Pair phone, Vault password and Settings are pages of it, in the same dark
+Keepers, Pair phone and Settings (which also sets the vault's own password, issue #36)
+are pages of it, in the same dark
 sidebar shell as Getway Chat and the other f-proj apps — the shared
 [`@f-proj/ui-components`](https://github.com/vasyaod/ui-components) `AppShell` on
 rsuite. The tray / menu-bar icon opens it on any page; closing it hides it and the
