@@ -47,7 +47,7 @@ test("the window that owns the channel is served", () => {
 });
 
 test("a channel served for two windows accepts either", () => {
-  // keeper:vault-status (prompt + vaultpw) and keeper:view-image (prompt + history).
+  // keeper:vault-status (prompt + settings) and keeper:view-image (prompt + history).
   assert.equal(refuseSender(realSender(PAIR), [PROMPT, PAIR]), null);
   assert.equal(refuseSender(realSender(PROMPT), [PROMPT, PAIR]), null);
 });

@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
-import { Message, Panel, Toggle } from "rsuite";
+import { useEffect, useRef, useState } from "react";
+import { Button, Message, Panel, Toggle } from "rsuite";
 import GearIcon from "@rsuite/icons/Gear";
 import { PageBody, PageHeader } from "@f-proj/ui-components";
+import VaultPassword from "../components/VaultPassword.jsx";
+import { VAULT_PASSWORD } from "../lib/nav.js";
 
 // How the vault state reported by the main process (device.js `state`) reads to a human.
 // `tone` picks the color: a legacy v1 key or an undecryptable vault are problems to fix,
@@ -10,7 +12,7 @@ const VAULT_STATE = {
   ok: { tone: "ok", text: "In sync — current key model (v2)." },
   no_key: { tone: "muted", text: "No vault key on this device — pair it, or save a field to the vault to create one." },
   needs_repair: { tone: "bad", text: "A vault exists but this device can't decrypt it — re-pair this device." },
-  legacy_v1: { tone: "bad", text: "Legacy key model — needs migration. Use the Vault password page to re-encrypt onto v2." },
+  legacy_v1: { tone: "bad", text: "Legacy key model — needs migration.", action: "Set a vault password to re-encrypt onto v2." },
 };
 const TONE = { ok: "success", bad: "error", muted: "info" };
 
@@ -42,12 +44,27 @@ function Row({ label, children, mono }) {
 // it holds. Everything shown here is the same inert metadata the Keeper reports to the
 // service on connect (no password, no key, and no `secret_id` for a legacy v1 key —
 // there the id IS the key, see src/vault.js).
-export default function SettingsPage() {
+//
+// The vault's own password is a section of this page (issue #36; it was the Vault
+// password page): `section` "vault-password" — what the old `vaultpw` key, the tray's
+// legacy-v1 warning and the legacy-key links open — scrolls it into view and puts the
+// caret in its first field. `sectionSeq` changes on every navigation, so asking again
+// while already here scrolls again.
+export default function SettingsPage({ go, section, sectionSeq }) {
   const [loading, setLoading] = useState(true);
   const [showWindow, setShowWindow] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
   const [info, setInfo] = useState(null); // { device, vault } | { error }
+  const vaultRef = useRef(null);
+  const vaultInputRef = useRef(null);
+
+  const loadInfo = async () => {
+    try {
+      const r = await window.keeperSettings.deviceInfo?.();
+      setInfo(r && r.ok ? r : { error: (r && r.error) || "Could not read this device's state." });
+    } catch (e) { setInfo({ error: e.message }); }
+  };
 
   useEffect(() => {
     (async () => {
@@ -58,13 +75,14 @@ export default function SettingsPage() {
       } catch (e) { setErr(e.message); }
       setLoading(false);
     })();
-    (async () => {
-      try {
-        const r = await window.keeperSettings.deviceInfo?.();
-        setInfo(r && r.ok ? r : { error: (r && r.error) || "Could not read this device's state." });
-      } catch (e) { setInfo({ error: e.message }); }
-    })();
+    loadInfo();
   }, []);
+
+  useEffect(() => {
+    if (section !== "vault-password" || !vaultRef.current) return;
+    vaultRef.current.scrollIntoView({ block: "start" });
+    try { vaultInputRef.current && vaultInputRef.current.focus({ preventScroll: true }); } catch { /* not focusable while disabled */ }
+  }, [section, sectionSeq]);
 
   const toggle = async (next) => {
     setShowWindow(next); // optimistic
@@ -80,7 +98,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader icon={<GearIcon />} title="Settings" meta="this device only" />
+      <PageHeader icon={<GearIcon />} title="Settings" />
       <PageBody>
         <div className="page-wrap">
           <div className="card-grid">
@@ -106,6 +124,9 @@ export default function SettingsPage() {
                 {info.vault.secret_id && <Row label="Vault ID" mono>{info.vault.secret_id.slice(0, 16)}…</Row>}
                 <Message type={TONE[(VAULT_STATE[info.vault.state] || {}).tone] || "info"} className="dl-note">
                   {(VAULT_STATE[info.vault.state] || { text: info.vault.state }).text}
+                  {VAULT_STATE[info.vault.state]?.action && go && (
+                    <> <Button appearance="link" size="sm" onClick={() => go(VAULT_PASSWORD)}>{VAULT_STATE[info.vault.state].action}</Button></>
+                  )}
                 </Message>
               </>
             )}
@@ -130,6 +151,13 @@ export default function SettingsPage() {
             </p>
           </Panel>
           </div>
+
+          <section id="vault-password" className="page-section" ref={vaultRef}>
+            <h3 className="section-title">Vault password</h3>
+            {/* A new password changes what "This device" says about the vault (a legacy v1
+                key becomes v2), so it is read again. */}
+            <VaultPassword ref={vaultInputRef} onChanged={loadInfo} />
+          </section>
         </div>
       </PageBody>
     </>

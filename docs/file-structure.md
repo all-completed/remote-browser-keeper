@@ -28,7 +28,7 @@ remote-browser-keeper/
 ├── ui/                     # the windows' UI (sandboxed, no Node access) → renderer-dist/
 │   ├── app.html, main.jsx, App.jsx, brand.js            # the main window
 │   ├── approval.html, approval.jsx, ApprovalApp.jsx     # the approval window (issue #34)
-│   ├── pages/              # Approvals, History, Cards, Saved fields, Headless, Pair, Vault password, Settings
+│   ├── pages/              # Approvals, History, Cards, Saved fields, Headless, Pair, Settings
 │   ├── components/, lib/, styles/app.css
 └── test/                   # node --test; test/fake-electron/ runs main.js without Electron
 ```
@@ -73,7 +73,8 @@ the sidebar moves between them in place.
 | --- | --- |
 | `pages/ApprovalsPage.jsx` | what is waiting (*N fill requests and M headless Keepers waiting* + **Show approval window**) and the tray's warnings. Requests themselves are answered in the approval window, below. |
 | `pages/HistoryPage.jsx` | the **History** window — one list from this device's log **and** the service's ([details](#request-history--one-list-from-two)). |
-| `pages/CardsPage.jsx`, `SavedFieldsPage.jsx`, `HeadlessPage.jsx`, `PairPage.jsx`, `VaultPasswordPage.jsx`, `SettingsPage.jsx` | the windows of the same names. |
+| `pages/CardsPage.jsx`, `SavedFieldsPage.jsx`, `HeadlessPage.jsx`, `PairPage.jsx`, `SettingsPage.jsx` | the windows of the same names. |
+| `components/VaultPassword.jsx`, `lib/nav.js` | the **Vault password** window — now the *Vault password* section of Settings (issue #36). Navigation targets are a page key or `page#section`; the old `vaultpw` key (retired page key, still accepted from older callers) is an alias of `settings#vault-password`, in `src/main.js` (`pageTarget`) and `lib/nav.js` (`resolveTarget`) alike — pinned by `test/nav.test.mjs` and `test/mainwindow.test.mjs`. |
 | `components/ImageViewer.jsx` | the **full-size screenshot** window — now an in-app full-size modal. |
 | `components/ListFilters.jsx`, `lib/search.js` | the **search box and filter pickers** of every long list (History, Saved fields, Cards, Headless Keepers — issue #31): `PageHeader`'s filter row, filtering client-side what the page already holds (every word of the query must appear; pinned by `test/search.test.mjs`). |
 
@@ -86,7 +87,7 @@ Layout (issue #31, `styles/app.css`): the sidebar's brand block and the title ba
 content area up to 1680 px (a maximized 1920 px screen) and is centred beyond it. Lists are
 ui-components `ResponsiveTable`s (stacked cards on a phone), forms and details are bordered
 cards in `.card-grid` / `.split` grids that follow the column's width (container queries),
-and a single request or form (Approvals, Pair phone, Vault password) is a centred 880 px
+and a single request or form (Approvals, Pair phone) is a centred 880 px
 column.
 
 #### The approval window (issue #34)
@@ -472,7 +473,7 @@ paired Keeper through the service's `/api/vault` endpoint.
 `~/.remote-browser-keeper/<base-url>/vault-key.json`, **OS-encrypted at rest** (Electron
 `safeStorage` → macOS Keychain / Windows DPAPI / libsecret), holds `{ password, format,
 salt? }`. The Keeper generates a high-entropy password on first use; the user may replace
-it with their own via **Set vault password…** (which re-encrypts + re-uploads the vault,
+it with their own in **Settings… → Vault password** (which re-encrypts + re-uploads the vault,
 after which other devices must re-pair). This file never leaves the machine except as the
 vault password inside a pair QR.
 

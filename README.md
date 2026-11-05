@@ -4,7 +4,8 @@ A small **tray-resident Electron app** that supplies passwords/logins to remote
 browser sessions **without the value ever reaching the AI model**.
 
 It is **one window** (issue #28): Approvals, History, Cards, Saved fields, Headless
-Keepers, Pair phone, Vault password and Settings are pages of it, in the same dark
+Keepers, Pair phone and Settings (which also sets the vault's own password, issue #36)
+are pages of it, in the same dark
 sidebar shell as Getway Chat and the other f-proj apps — the shared
 [`@f-proj/ui-components`](https://github.com/vasyaod/ui-components) `AppShell` on
 rsuite. The tray / menu-bar icon opens it on any page; closing it hides it and the
@@ -121,7 +122,7 @@ from outside:
 | `ok` | on a v2 key model, vault readable | — |
 | `no_key` | this device holds no vault key (never paired, or cleared) | pair it |
 | `needs_repair` | a vault exists but this device can't decrypt it (`VaultKeyMismatch`) | re-pair it |
-| `legacy_v1` | still on legacy `aesgcm-sha256-v1` | **migrate** — Set vault password… |
+| `legacy_v1` | still on legacy `aesgcm-sha256-v1` | **migrate** — Settings… → Vault password |
 
 `secret_id` is the opaque, domain-separated id of the vault this device can open
 (`sha256("rbvault-id-v2" ‖ master)`), so it is safe to publish and lets the service group

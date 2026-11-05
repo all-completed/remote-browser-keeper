@@ -2,6 +2,7 @@ import { Button, Message, Panel } from "rsuite";
 import NoticeIcon from "@rsuite/icons/Notice";
 import { PageBody, PageHeader } from "@f-proj/ui-components";
 import { dismiss, showApproval } from "../lib/statusBridge.js";
+import { VAULT_PASSWORD } from "../lib/nav.js";
 
 // The warnings the tray shows, here as well — the Approvals page is where the user looks
 // when something they answered did not go through.
@@ -30,7 +31,7 @@ function Warnings({ status, go }) {
       )}
       {status.vaultLegacyKey && (
         <Message type="warning" showIcon>
-          Vault: legacy v1 key — <Button appearance="link" size="sm" onClick={() => go("vaultpw")}>set a vault password</Button> to migrate.
+          Vault: legacy v1 key — <Button appearance="link" size="sm" onClick={() => go(VAULT_PASSWORD)}>set a vault password</Button> to migrate.
         </Message>
       )}
     </>

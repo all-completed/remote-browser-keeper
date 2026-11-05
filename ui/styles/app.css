@@ -62,7 +62,7 @@ input, textarea, code, .revealed, .selectable { -webkit-user-select: text; user-
   /* A list beside the editor of the row picked in it (Cards). */
   .split.list-editor { grid-template-columns: minmax(320px, 2fr) minmax(0, 3fr); }
 }
-/* Two equal cards (Pair phone, Vault password): side by side as soon as each gets ~320px. */
+/* Two equal cards (Pair phone, Settings' vault password): side by side as soon as each gets ~320px. */
 @container (min-width: 660px) {
   .split.even { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -70,6 +70,9 @@ input, textarea, code, .revealed, .selectable { -webkit-user-select: text; user-
 .card-title { font-size: 15px; font-weight: 600; color: var(--app-color-text); }
 .card-sub { font-size: 12.5px; color: var(--app-color-text-muted); font-weight: 400; margin-top: 2px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
+/* A titled section of a page that links can open (Settings' vault password, issue #36). */
+.page-section { display: flex; flex-direction: column; gap: 12px; scroll-margin-top: 16px; }
+.section-title { margin: 8px 0 0; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--app-color-text-muted); }
 
 /* Tables (ui-components ResponsiveTable): the grid on its own bordered surface, rows that
    grow to their content (wordWrap), cells vertically centred. */
@@ -174,7 +177,7 @@ p { margin: 0; }
   .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* Numbered / bulleted how-to inside a card (Pair phone, Vault password). */
+/* Numbered / bulleted how-to inside a card (Pair phone, Settings' vault password). */
 .steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; color: var(--app-color-text-secondary); }
 .table-empty { padding: 24px 16px; text-align: center; }
 
